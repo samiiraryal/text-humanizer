@@ -48,13 +48,33 @@ with st.sidebar:
     selected_model_id   = model_options[selected_model_name]
 
     st.markdown("---")
+    st.subheader("Document Type")
+    doc_type = st.selectbox("What are you humanizing?", [
+        "General Content (Blog / Article / Essay)",
+        "Professional Email",
+        "Academic / Research Writing",
+        "Cover Letter / Application",
+    ])
+    st.caption({
+        "General Content (Blog / Article / Essay)":    "✅ Full stealth pipeline — aggressive humanization",
+        "Professional Email":                          "⚠️ Restrained pipeline — keeps formal tone, fixes AI tells only",
+        "Academic / Research Writing":                 "⚠️ Conservative pipeline — preserves structure and citations",
+        "Cover Letter / Application":                  "⚠️ Restrained pipeline — professional voice, no fabrications",
+    }[doc_type])
+
+    st.markdown("---")
     st.subheader("Style")
-    tone = st.selectbox("Tone", [
+
+    # Tone selector is only meaningful for general content
+    tone_disabled = doc_type != "General Content (Blog / Article / Essay)"
+    tone = st.selectbox("Tone (General Content only)", [
         "Conversational & Raw",
         "Professional but Natural",
         "Storyteller",
         "Opinionated Blog",
-    ])
+    ], disabled=tone_disabled)
+    if tone_disabled:
+        st.caption("🔒 Tone is fixed for this document type.")
 
     st.markdown("---")
     st.subheader("Pipeline")
@@ -214,8 +234,63 @@ ZeroGPT Countermeasures (formal transitions + uniform clause length):
 
 
 # ─────────────────────────────────────────────
-#  TONE PROMPTS
+#  FORMAL DOCUMENT PROMPTS (restrained pipeline)
 # ─────────────────────────────────────────────
+
+FORMAL_PROMPTS = {
+    "Professional Email": """
+You are a professional editor lightly editing this email to sound naturally human-written.
+
+STRICT RULES:
+- Keep the formal greeting and sign-off (Dear / Best regards / Sincerely). Do NOT change to "Hey".
+- Keep ALL factual claims exactly as stated. NEVER invent experiences, events, or personal stories.
+- Keep all specific technical terms, project names, tools, and credentials exactly as written.
+- ONLY make these kinds of changes:
+    • Replace stiff formal phrases with natural but still professional equivalents
+    • Add contractions where natural (I am → I'm, I have → I've, I would → I'd)
+    • Break up any overly long, run-on sentences
+    • Remove filler phrases like "I am writing to" or "I would like to take this opportunity"
+    • Make the motivation/closing line feel genuine rather than templated
+- Do NOT add casual phrases like "honestly", "look,", "here's the thing", "to be fair"
+- Do NOT start sentences with And/But/So in a formal email
+- Do NOT rearrange the structure or reorder bullet points
+- Output ONLY the rewritten email.
+""",
+    "Academic / Research Writing": """
+You are an academic editor lightly revising this text to sound naturally human-written while preserving scholarly tone.
+
+STRICT RULES:
+- Preserve all citations, data points, technical terms, and factual claims exactly.
+- Keep formal academic transitions (however, therefore, furthermore) — these are APPROPRIATE here.
+- Only change: overly passive constructions, unnecessarily complex sentence structures, and AI buzzwords.
+- Do NOT inject casual language, contractions, or personal asides.
+- Do NOT reorder arguments or restructure paragraphs.
+- Replace only the most obvious AI phrases: "it is important to note", "delve into", "in the realm of".
+- Output ONLY the revised text.
+""",
+    "Cover Letter / Application": """
+You are a professional editor lightly editing this cover letter to sound naturally human-written.
+
+STRICT RULES:
+- Keep ALL factual claims, credentials, project names, and experiences exactly as stated.
+- NEVER fabricate personal anecdotes, events, or emotional stories not present in the original.
+- Keep professional tone throughout — no slang, no casual openers like "Hey".
+- Make these changes ONLY:
+    • Add natural contractions (I am → I'm, I have → I've)
+    • Replace templated opener phrases ("I am writing to express my strong interest" → "I'm interested in")
+    • Make the closing line feel genuine rather than boilerplate
+    • Vary sentence length slightly where the original is very uniform
+    • Replace obvious AI buzzwords with plain equivalents
+- Preserve bullet point structure if present — do NOT convert to prose
+- Do NOT add new claims, stories, or motivations
+- Output ONLY the rewritten letter.
+""",
+}
+
+
+def is_formal_doc(doc_type: str) -> bool:
+    return doc_type != "General Content (Blog / Article / Essay)"
+
 
 TONE_PROMPTS = {
     "Conversational & Raw": """
@@ -382,7 +457,31 @@ def build_system_prompt(tone, gptzero, originality, turnitin, zerogpt) -> str:
     return combined
 
 
-def humanize(text, tone, client, model_id, num_passes, stealth, gptzero, originality, turnitin, zerogpt):
+def humanize(text, tone, doc_type, client, model_id, num_passes, stealth, gptzero, originality, turnitin, zerogpt):
+
+    # ── Formal document path: single-pass, restrained, no post-processing quirks ──
+    if is_formal_doc(doc_type):
+        formal_prompt = FORMAL_PROMPTS[doc_type]
+        try:
+            r = client.chat.completions.create(
+                model=model_id,
+                temperature=0.55,   # Low temp — we want controlled, not creative
+                max_tokens=2500,
+                top_p=0.85,
+                messages=[
+                    {"role": "system", "content": formal_prompt},
+                    {"role": "user",   "content": f"Edit this:\n\n{text}"},
+                ]
+            )
+            result = r.choices[0].message.content.strip()
+            # Only run cliché removal for formal docs — no quirks, no burstiness scrambling
+            if stealth:
+                result = clean_cliches(result)
+            return result
+        except Exception as e:
+            return f"Error: {e}"
+
+    # ── General content path: full aggressive pipeline ──
     system_prompt = build_system_prompt(tone, gptzero, originality, turnitin, zerogpt)
 
     try:
@@ -455,12 +554,12 @@ def humanize(text, tone, client, model_id, num_passes, stealth, gptzero, origina
             )
             current_text = r3.choices[0].message.content
 
-        # ── Stealth post-processing ──
+        # ── Stealth post-processing (general content only) ──
         if stealth:
             current_text = clean_cliches(current_text)
             current_text = inject_quirks(current_text, tone)
             current_text = vary_burstiness(current_text)
-            if originality:  # Originality-specific fix
+            if originality:
                 current_text = add_human_specificity(current_text)
 
         return current_text.strip()
@@ -469,9 +568,14 @@ def humanize(text, tone, client, model_id, num_passes, stealth, gptzero, origina
         return f"Error: {e}"
 
 
-def cache_key(text, tone, model, passes, stealth, gpt, ori, tur, zer, rand):
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def cache_key(text, tone, doc_type, model, passes, stealth, gpt, ori, tur, zer, rand):
     seed = str(random.random()) if rand else ""
-    return hashlib.md5(f"{text}{tone}{model}{passes}{stealth}{gpt}{ori}{tur}{zer}{seed}".encode()).hexdigest()
+    return hashlib.md5(f"{text}{tone}{doc_type}{model}{passes}{stealth}{gpt}{ori}{tur}{zer}{seed}".encode()).hexdigest()
 
 
 # ─────────────────────────────────────────────
@@ -480,8 +584,8 @@ def cache_key(text, tone, model, passes, stealth, gpt, ori, tur, zer, rand):
 
 st.title("🕵️ Authentica v3 — Multi-Detector Humanizer")
 st.markdown(
-    "Engineered to lower scores on **GPTZero**, **Originality.ai**, **Turnitin**, and **ZeroGPT** simultaneously. "
-    "Uses detector-specific countermeasures at the prompt level."
+    "Engineered to lower scores on **GPTZero**, **Originality.ai**, **Turnitin**, and **ZeroGPT**. "
+    "Uses **document-type-aware** pipelines — formal docs get a restrained edit; general content gets the full stealth treatment."
 )
 
 # Show active detector badges
@@ -520,14 +624,14 @@ with col2:
         else:
             client = Groq(api_key=api_key)
 
-            pass_label = {1: "1-pass", 2: "2-pass", 3: "3-pass"}[num_passes]
-            with st.spinner(f"Running {pass_label} pipeline against {sum([target_gptzero, target_originality, target_turnitin, target_zerogpt])} detectors..."):
+            pass_label = "1-pass (restrained)" if is_formal_doc(doc_type) else {1: "1-pass", 2: "2-pass", 3: "3-pass"}[num_passes]
+            with st.spinner(f"Running {pass_label} pipeline — {doc_type}..."):
 
                 if 'cache' not in st.session_state:
                     st.session_state.cache = {}
 
                 ck = cache_key(
-                    input_text, tone, selected_model_id, num_passes, stealth,
+                    input_text, tone, doc_type, selected_model_id, num_passes, stealth,
                     target_gptzero, target_originality, target_turnitin, target_zerogpt,
                     randomize
                 )
@@ -536,7 +640,7 @@ with col2:
                     result = st.session_state.cache[ck]
                 else:
                     result = humanize(
-                        input_text, tone, client, selected_model_id,
+                        input_text, tone, doc_type, client, selected_model_id,
                         num_passes, stealth,
                         target_gptzero, target_originality, target_turnitin, target_zerogpt
                     )
@@ -551,32 +655,43 @@ with col2:
                 st.success(f"✅ Done! {num_passes}-pass pipeline complete.")
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Passes",      num_passes)
-                c2.metric("Detectors",   sum([target_gptzero, target_originality, target_turnitin, target_zerogpt]))
-                c3.metric("Temp",        "0.93–0.97")
+                c1.metric("Pipeline",    "Restrained" if is_formal_doc(doc_type) else "Full Stealth")
+                c2.metric("Passes",      1 if is_formal_doc(doc_type) else num_passes)
+                c3.metric("Detectors",   sum([target_gptzero, target_originality, target_turnitin, target_zerogpt]))
                 c4.metric("Post-proc",   "On" if stealth else "Off")
 
 st.markdown("---")
-with st.expander("📖 How each detector is beaten — and what to do manually"):
+with st.expander("📖 How it works — two pipelines explained"):
     st.markdown("""
-    ### Why each detector flags AI text
+    ### Document-Type-Aware Pipelines
+
+    | Document Type | Pipeline | Temperature | Post-processing |
+    |---|---|---|---|
+    | **General Content** (Blog/Article/Essay) | Full 3-pass stealth | 0.93–0.97 | Clichés + quirks + burstiness |
+    | **Professional Email** | Single-pass restrained | 0.55 | Clichés only |
+    | **Academic Writing** | Single-pass restrained | 0.55 | Clichés only |
+    | **Cover Letter** | Single-pass restrained | 0.55 | Clichés only |
+
+    **Why formal docs need a different pipeline:**
+    Aggressive humanization (high temperature, sentence scrambling, casual injections) actively *hurts* formal writing.
+    A professor or hiring manager will notice "Hey Dr. X" or fabricated personal stories immediately.
+    The restrained pipeline only fixes actual AI tells — stiff phrasing, missing contractions, buzzwords — without touching structure or adding anything new.
+
+    ### How each detector is beaten (General Content)
 
     | Detector | Primary Signal | This Tool's Fix |
     |---|---|---|
-    | **GPTZero** | Low perplexity + low burstiness | High temp (0.97), aggressive sentence length mixing, unusual word choices |
-    | **Originality.ai** | Semantic fingerprinting of high-probability token sequences | Idea reordering, concrete specifics injected, idiom insertion |
-    | **Turnitin** | Structural patterns + absence of personal voice | Paragraph asymmetry, first-person injection, opinion statements |
-    | **ZeroGPT** | Formal transitions + uniform clause lengths | All formal transitions replaced, conjunction sentence starters, contractions |
+    | **GPTZero** | Low perplexity + low burstiness | High temp (0.97), aggressive sentence length mixing |
+    | **Originality.ai** | Semantic fingerprinting | Idea reordering, concrete specifics injected, idioms |
+    | **Turnitin** | Structural patterns + no personal voice | Paragraph asymmetry, opinion statements |
+    | **ZeroGPT** | Formal transitions + uniform clause lengths | All formal transitions replaced, contractions |
 
-    ### 4 manual tweaks that close the last 10–20%
+    ### 4 manual tweaks that close the last gap
 
-    1. **Add one real, specific detail** — a number, date, or named example ("In a 2023 Stanford study…" or "When I tried this with a team of 8 people…")
-    2. **Break paragraph symmetry by hand** — split one long paragraph into two unequal ones, or combine two short ones
-    3. **Change one sentence to a question** — "Why does this matter?" or "Sound familiar?"
-    4. **Add one intentional imperfection** — a mild repetition, a dash of self-correction ("or rather, what I mean is…"), or a colloquial aside
-
-    ### Model recommendation
-    **Llama 3.1 8B** consistently outperforms larger models for humanization. Bigger models are *too good* — they write too cleanly.
+    1. **Add one real specific detail** — a number, date, or named example
+    2. **Break paragraph symmetry** — split one long paragraph or combine two short ones
+    3. **Turn one statement into a question** — "Why does this matter?" or "Sound familiar?"
+    4. **Add one natural self-correction** — "or rather, what I mean is…" or a parenthetical aside
     """)
 
 st.markdown("*Powered by Groq Cloud | Authentica v3 | Multi-Detector Engine*")
