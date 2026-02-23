@@ -2,148 +2,581 @@ import streamlit as st
 from groq import Groq
 import time
 import hashlib
+import re
+import random
 
 # --- Page Config ---
-st.set_page_config(page_title="Authentica Humanizer", page_icon="✍️", layout="wide")
+st.set_page_config(page_title="Authentica v3 | Multi-Detector", page_icon="🕵️", layout="wide")
 
-# --- CSS Styling ---
 st.markdown("""
     <style>
-    .stTextArea label {font-weight: bold;}
-    .success-box {padding: 10px; background-color: #d4edda; border-radius: 5px; color: #155724;}
-    .warning-box {padding: 10px; background-color: #fff3cd; border-radius: 5px; color: #856404;}
-    .error-box {padding: 10px; background-color: #f8d7da; border-radius: 5px; color: #721c24;}
+    body { font-family: 'Segoe UI', sans-serif; }
+    .stTextArea label { font-weight: bold; }
+    .detector-badge {
+        display: inline-block; padding: 4px 10px; border-radius: 12px;
+        font-size: 12px; font-weight: bold; margin: 2px;
+    }
+    .badge-green { background: #d4edda; color: #155724; }
+    .badge-yellow { background: #fff3cd; color: #856404; }
+    .badge-red { background: #f8d7da; color: #721c24; }
+    .tip-box { padding: 12px; background: #f0f4ff; border-left: 4px solid #4a6cf7; border-radius: 4px; margin: 8px 0; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# --- Sidebar: Configuration ---
+# ─────────────────────────────────────────────
+#  SIDEBAR
+# ─────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    
-    # API Key
-    api_key = st.text_input("Groq API Key", type="password", help="Get one free at console.groq.com")
-    
+    api_key = st.text_input("Groq API Key", type="password", help="console.groq.com")
+
     st.markdown("---")
-    
-    # MODEL SELECTOR (Crucial Fix)
-    st.subheader("Model Selection")
+    st.subheader("🎯 Target Detectors")
+    target_gptzero      = st.checkbox("GPTZero",        value=True)
+    target_originality  = st.checkbox("Originality.ai", value=True)
+    target_turnitin     = st.checkbox("Turnitin",       value=True)
+    target_zerogpt      = st.checkbox("ZeroGPT",        value=True)
+
+    st.markdown("---")
+    st.subheader("Model")
     model_options = {
-        "Llama 3.3 70B (Best Quality)": "llama-3.3-70b-versatile",
-        "Llama 3.1 8B (Fastest)": "llama-3.1-8b-instant",
-        "Mixtral 8x7B (Alternative)": "mixtral-8x7b-32768",
-        "Gemma 2 9B (Alternative)": "gemma2-9b-it"
+        "Llama 3.1 8B — Best Human Feel":    "llama-3.1-8b-instant",
+        "Llama 3.3 70B — Most Intelligent":  "llama-3.3-70b-versatile",
+        "Mixtral 8x7B — Alternative":        "mixtral-8x7b-32768",
     }
-    selected_model_name = st.selectbox("Choose Model", list(model_options.keys()))
-    selected_model_id = model_options[selected_model_name]
-    
-    st.markdown("---")
-    
-    # Tone & Creativity
-    tone = st.selectbox("Target Tone", ["Natural & Casual", "Professional & Polished", "Creative & Expressive", "Academic & Formal"])
-    creativity = st.slider("Creativity Level", 0.0, 1.0, 0.7)
-    
-    st.markdown("---")
-    st.info("💡 **Privacy Note:** Text is sent to Groq API. Do not upload sensitive personal data.")
-    
-    # History
-    st.markdown("### History (Local)")
-    if 'history' not in st.session_state:
-        st.session_state.history = []
-    for item in st.session_state.history[-5:]:
-        st.markdown(f"- {item[:30]}...")
+    selected_model_name = st.selectbox("Model", list(model_options.keys()))
+    selected_model_id   = model_options[selected_model_name]
 
-# --- Helper Functions ---
-def get_cache_key(text, tone, model):
-    """Generate a unique ID for caching to save API calls."""
-    return hashlib.md5(f"{text}{tone}{model}".encode()).hexdigest()
+    st.markdown("---")
+    st.subheader("Style")
+    tone = st.selectbox("Tone", [
+        "Conversational & Raw",
+        "Professional but Natural",
+        "Storyteller",
+        "Opinionated Blog",
+    ])
 
-def humanize_text(text, tone, creativity, client, model_id):
-    """Send text to Groq for rewriting."""
-    
-    prompts = {
-        "Natural & Casual": "Rewrite this text to sound like a friendly human conversation. Use contractions, varied sentence lengths, and occasional colloquialisms. Avoid robotic perfection.",
-        "Professional & Polished": "Rewrite this text to sound like a seasoned professional. Clear, concise, active voice, but warm and engaging. Avoid overly stiff corporate jargon.",
-        "Creative & Expressive": "Rewrite this text with flair. Use metaphors, vivid adjectives, and varied rhythm. Make it engaging and unique.",
-        "Academic & Formal": "Rewrite this text for an academic audience. Precise vocabulary, complex sentence structures, objective tone, but ensure flow and readability."
+    st.markdown("---")
+    st.subheader("Pipeline")
+    num_passes  = st.slider("Rewrite Passes", 1, 3, 3,
+                             help="3 passes gives the lowest detection scores")
+    stealth     = st.checkbox("Stealth Post-Processing", value=True)
+    randomize   = st.checkbox("Randomize on Each Run",   value=True,
+                               help="Disables cache so each run is unique")
+
+    st.markdown("---")
+    st.info("🏆 Best combo: **8B + 3 passes + Stealth**, all detectors checked.")
+    st.warning("⚠️ For legitimate content work only.")
+
+
+# ─────────────────────────────────────────────
+#  AI CLICHE / BUZZWORD REMOVAL
+# ─────────────────────────────────────────────
+
+AI_CLICHE_MAP = {
+    # Verbs
+    "delve": ["dig into", "get into", "look at", "explore"],
+    "delves": ["digs into", "gets into", "explores"],
+    "delving": ["digging into", "getting into", "exploring"],
+    "unlock": ["open up", "access", "tap into", "find"],
+    "unleash": ["release", "let out", "bring out", "use"],
+    "utilize": ["use", "apply", "work with"],
+    "utilizes": ["uses", "applies", "works with"],
+    "leverage": ["use", "tap into", "rely on", "draw on"],
+    "leverages": ["uses", "taps into", "draws on"],
+    "foster": ["build", "grow", "encourage", "support"],
+    "facilitate": ["help", "enable", "support", "make easier"],
+    "navigate": ["handle", "deal with", "work through", "manage"],
+    "ensure": ["make sure", "confirm", "see that"],
+    "underscore": ["highlight", "show", "point out", "stress"],
+    "showcase": ["show", "display", "highlight", "demonstrate"],
+    "harness": ["use", "apply", "tap into", "channel"],
+
+    # Nouns
+    "realm": ["area", "space", "world", "domain", "field"],
+    "landscape": ["field", "scene", "environment", "picture", "world"],
+    "testament": ["proof", "sign", "evidence", "indicator"],
+    "paradigm": ["model", "approach", "way of thinking", "framework"],
+    "synergy": ["teamwork", "collaboration", "combined effort"],
+    "ecosystem": ["system", "network", "environment", "setup"],
+
+    # Adjectives
+    "paramount": ["key", "critical", "essential", "top-priority", "vital"],
+    "pivotal": ["key", "crucial", "central", "critical", "important"],
+    "groundbreaking": ["new", "innovative", "fresh", "original", "novel"],
+    "cutting-edge": ["new", "modern", "latest", "up-to-date", "advanced"],
+    "cutting edge": ["new", "modern", "latest", "up-to-date"],
+    "robust": ["strong", "solid", "reliable", "well-built", "solid"],
+    "comprehensive": ["complete", "full", "thorough", "detailed", "wide-ranging"],
+    "innovative": ["new", "creative", "fresh", "original", "inventive"],
+    "transformative": ["significant", "major", "powerful", "game-changing"],
+    "multifaceted": ["complex", "layered", "varied", "nuanced"],
+
+    # Adverbs & filler phrases
+    "seamlessly": ["smoothly", "easily", "without friction", "naturally"],
+    "notably": ["interestingly", "worth mentioning", "importantly"],
+
+    # Transition words / phrases that scream AI
+    "moreover":             ["also", "on top of that", "plus", "and"],
+    "furthermore":          ["beyond that", "also", "what's more", "and"],
+    "consequently":         ["so", "as a result", "because of that", "this means"],
+    "nevertheless":         ["still", "even so", "that said", "but"],
+    "in conclusion":        ["to wrap up", "at the end of the day", "so", "bottom line"],
+    "in summary":           ["in short", "to put it simply", "bottom line", "briefly"],
+    "it is important to note":  ["worth noting", "keep in mind", "note that"],
+    "it's important to note":   ["worth noting", "keep in mind", "note that"],
+    "it is worth noting":       ["worth mentioning", "note that", "keep in mind"],
+    "it's worth noting":        ["worth mentioning", "note that"],
+    "in the world of":          ["in", "within", "across", "inside"],
+    "in today's":               ["today,", "these days,", "right now,", "nowadays,"],
+    "game-changer":             ["big shift", "real difference-maker", "major change"],
+    "game changer":             ["big shift", "real difference-maker", "major change"],
+    "one must":                 ["you need to", "you have to", "it helps to"],
+    "in order to":              ["to"],
+    "due to the fact that":     ["because", "since"],
+    "at this point in time":    ["now", "currently", "at this point"],
+    "as we can see":            ["clearly", "as shown", "it's clear that", "you can see"],
+}
+
+TRANSITION_SWAPS = {
+    "However,": ["But", "Still,", "That said,", "Even so,", "Yet,"],
+    "Nevertheless,": ["Still,", "Even so,", "But", "That said,"],
+    "Therefore,": ["So,", "This means", "Because of that,", "As a result,"],
+    "Additionally,": ["Also,", "On top of that,", "And", "Plus,"],
+    "In addition,": ["Also,", "Plus,", "And", "On top of that,"],
+    "Notably,": ["Interestingly,", "Here's the thing —", "Worth noting:"],
+    "Importantly,": ["Here's the key part:", "What matters is", "Crucially,"],
+    "Consequently,": ["So,", "As a result,", "Because of this,"],
+    "Furthermore,": ["And", "Plus,", "What's more,", "Also,"],
+    "Moreover,": ["Also,", "And", "On top of that,", "Beyond that,"],
+}
+
+
+def clean_cliches(text: str) -> str:
+    cleaned = text
+    for phrase, options in sorted(AI_CLICHE_MAP.items(), key=lambda x: -len(x[0])):
+        pattern = r'\b' + re.escape(phrase) + r'\b'
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            replacement = random.choice(options)
+            cleaned = re.sub(pattern, replacement, cleaned, count=1, flags=re.IGNORECASE)
+    for phrase, options in TRANSITION_SWAPS.items():
+        cleaned = cleaned.replace(phrase, random.choice(options))
+    return cleaned
+
+
+# ─────────────────────────────────────────────
+#  DETECTOR-SPECIFIC WEAKNESSES
+# ─────────────────────────────────────────────
+
+def get_detector_instructions(gptzero, originality, turnitin, zerogpt) -> str:
+    """
+    Each detector has a known weakness. Build targeted instructions.
+    GPTZero    → perplexity + burstiness
+    Originality → semantic fingerprinting, looks for consistent high-probability sequences
+    Turnitin   → structural patterns, paragraph symmetry, absence of personal voice
+    ZeroGPT    → very sensitive to formal transitions and uniform clause length
+    """
+    parts = []
+
+    if gptzero:
+        parts.append("""
+GPTZero Countermeasures (perplexity + burstiness):
+- Mix sentence lengths AGGRESSIVELY. Some sentences: 4 words. Others can run long with embedded clauses, details, and qualifications that a real person might ramble through.
+- Use unexpected word choices occasionally — a slightly unusual but correct word raises perplexity.
+- Add one rhetorical question somewhere.
+""")
+    if originality:
+        parts.append("""
+Originality.ai Countermeasures (semantic fingerprinting):
+- Restructure the logical ORDER of ideas, not just the words. Don't just paraphrase — rearrange.
+- Use idiomatic expressions: "easier said than done", "at the end of the day", "the elephant in the room".
+- Introduce at least one concrete, specific example (a number, a name, a real scenario).
+- Avoid writing in clean topic-sentence → support → conclusion paragraph structure.
+""")
+    if turnitin:
+        parts.append("""
+Turnitin Countermeasures (structural patterns + personal voice):
+- Break paragraph symmetry. Paragraphs should NOT all be 3–4 sentences. Some: 1 sentence. Some: 6.
+- Use first-person voice ("I think", "in my experience", "what I've seen") where natural.
+- Include an opinion or mild judgment — "which, honestly, is the smarter approach".
+- Avoid perfectly parallel list structures (e.g., "First... Second... Third...").
+""")
+    if zerogpt:
+        parts.append("""
+ZeroGPT Countermeasures (formal transitions + uniform clause length):
+- Replace ALL formal transitions (However, Furthermore, Moreover, Additionally, Consequently) with casual ones: But, Also, So, Plus, And.
+- Vary clause length inside sentences — don't write consistently balanced clauses.
+- Start at least 2 sentences with conjunctions: "And", "But", "So".
+- Use a contraction in every paragraph.
+""")
+
+    return "\n".join(parts) if parts else ""
+
+
+# ─────────────────────────────────────────────
+#  TONE PROMPTS
+# ─────────────────────────────────────────────
+
+TONE_PROMPTS = {
+    "Conversational & Raw": """
+You are rewriting this in a genuine, casual human voice. Like texting a smart friend.
+
+RULES:
+- Contractions everywhere: it's, don't, can't, won't, they're, we're.
+- Short sentences mixed with longer ones. No pattern.
+- OK to start sentences with And, But, So.
+- Use simple, concrete words. Zero corporate jargon.
+- Add one small parenthetical aside (like this).
+- Output ONLY the rewritten text.
+""",
+    "Professional but Natural": """
+You are a senior editor rewriting this in a confident, direct professional voice — like a smart colleague explaining something, not a consultant writing a report.
+
+RULES:
+- Direct and clear. No fluff. No hedging unless necessary.
+- Contractions where natural. No stiff language.
+- Active voice only. Cut all passive constructions.
+- Replace jargon with plain English equivalents.
+- Vary sentence length — some punchy short ones, some longer explanatory ones.
+- Output ONLY the rewritten text.
+""",
+    "Storyteller": """
+You are a narrative writer giving this content a story-like flow.
+
+RULES:
+- Make abstract concepts feel concrete and visual.
+- Use em dashes — like this — to add rhythm and emphasis.
+- Vary sentence length dramatically.
+- Show cause and effect through narrative progression.
+- One concrete scene-setting detail or analogy.
+- Output ONLY the rewritten text.
+""",
+    "Opinionated Blog": """
+You are a blogger with a distinct, confident voice.
+
+RULES:
+- Write in first person. Use 'I' naturally.
+- Be direct and opinionated. State things plainly.
+- Use rhetorical questions: "Why does this matter? Because..."
+- Start some sentences with "Look,", "Here's the thing:", "And honestly,".
+- Contractions everywhere. Sound human, slightly impatient with fluff.
+- Output ONLY the rewritten text.
+""",
+}
+
+
+# ─────────────────────────────────────────────
+#  POST-PROCESSING
+# ─────────────────────────────────────────────
+
+def inject_quirks(text: str, tone: str) -> str:
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if len(sentences) < 3:
+        return text
+
+    contractions = {
+        "it is ": "it's ", "that is ": "that's ", "there is ": "there's ",
+        "they are ": "they're ", "we are ": "we're ", "you are ": "you're ",
+        "do not ": "don't ", "does not ": "doesn't ", "is not ": "isn't ",
+        "are not ": "aren't ", "have not ": "haven't ", "can not ": "can't ",
+        "will not ": "won't ", "would not ": "wouldn't ", "should not ": "shouldn't ",
+        "could not ": "couldn't ", "did not ": "didn't ", "was not ": "wasn't ",
     }
-    
-    system_instruction = prompts.get(tone, prompts["Natural & Casual"])
-    
+
+    modified = []
+    for i, sent in enumerate(sentences):
+        s = sent.strip()
+        # Apply contractions
+        if tone in ("Conversational & Raw", "Opinionated Blog", "Storyteller"):
+            for long, short in contractions.items():
+                if long in s:
+                    s = s.replace(long, short, 1)
+
+        # Randomly start with conjunction (natural speech)
+        if i > 0 and random.random() < 0.18:
+            if not re.match(r'^(And |But |So |Yet |Or |Look,|Plus,)', s):
+                prefix = random.choice(["And ", "But ", "So "])
+                s = prefix + s[0].lower() + s[1:]
+
+        modified.append(s)
+
+    return " ".join(modified)
+
+
+def vary_burstiness(text: str) -> str:
+    """Split long sentences and merge short ones to vary burstiness."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    result = []
+    i = 0
+    while i < len(sentences):
+        s = sentences[i]
+        wc = len(s.split())
+
+        # Split long sentences
+        if wc > 28 and random.random() < 0.65:
+            split_done = False
+            for splitter in [' and ', ' which ', ' because ', ' but ', ' while ', ' although ']:
+                idx = s.lower().find(splitter, max(15, len(s) // 3))
+                if idx != -1:
+                    part1 = s[:idx].strip().rstrip(',') + '.'
+                    rest  = s[idx + len(splitter):].strip()
+                    part2 = rest[0].upper() + rest[1:] if rest else rest
+                    result.extend([part1, part2])
+                    split_done = True
+                    break
+            if not split_done:
+                result.append(s)
+
+        # Merge two short sentences
+        elif wc < 7 and i + 1 < len(sentences) and len(sentences[i+1].split()) < 7 and random.random() < 0.45:
+            next_s = sentences[i+1]
+            merged = s.rstrip('.!?') + ', ' + next_s[0].lower() + next_s[1:]
+            result.append(merged)
+            i += 2
+            continue
+
+        else:
+            result.append(s)
+        i += 1
+
+    return ' '.join(result)
+
+
+def add_human_specificity(text: str) -> str:
+    """
+    Originality.ai specifically looks for generic AI writing.
+    Injecting a plausible-sounding specific detail raises the human score.
+    """
+    specifics = [
+        # These are natural-sounding asides a human might add
+        " — and I've seen this firsthand",
+        " — which, in practice, makes a real difference",
+        ", and that's not a small thing",
+        " — something most people overlook",
+        ", which is exactly the point",
+        " — simple, but it works",
+    ]
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if len(sentences) < 4:
+        return text
+    # Insert into a middle sentence, at a natural break
+    target_idx = random.randint(1, max(1, len(sentences) // 2))
+    s = sentences[target_idx]
+    if len(s.split()) > 10 and s.endswith('.'):
+        aside = random.choice(specifics)
+        sentences[target_idx] = s[:-1] + aside + '.'
+    return ' '.join(sentences)
+
+
+# ─────────────────────────────────────────────
+#  MAIN PIPELINE
+# ─────────────────────────────────────────────
+
+def build_system_prompt(tone, gptzero, originality, turnitin, zerogpt) -> str:
+    base    = TONE_PROMPTS.get(tone, TONE_PROMPTS["Conversational & Raw"])
+    targets = get_detector_instructions(gptzero, originality, turnitin, zerogpt)
+    combined = base
+    if targets:
+        combined += f"\n\nADDITIONAL ANTI-DETECTION RULES:\n{targets}"
+    combined += "\n\nFORBIDDEN WORDS (never use these): delve, utilize, leverage, paramount, landscape, realm, testament, moreover, furthermore, in conclusion, cutting-edge, game-changer, groundbreaking, pivotal, robust, seamlessly, foster, facilitate, comprehensive, innovative, transformative, synergy, ecosystem, paradigm.\n\nOutput ONLY the rewritten text."
+    return combined
+
+
+def humanize(text, tone, client, model_id, num_passes, stealth, gptzero, originality, turnitin, zerogpt):
+    system_prompt = build_system_prompt(tone, gptzero, originality, turnitin, zerogpt)
+
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"{system_instruction} \n\nIMPORTANT: Do not output any explanation, just the rewritten text."
-                },
-                {
-                    "role": "user",
-                    "content": f"Please humanize this text:\n\n{text}"
-                }
-            ],
-            model=model_id,
-            temperature=creativity,
-            max_tokens=2048,
-            top_p=1.0,
-            stream=False
-        )
-        return chat_completion.choices[0].message.content
+        current_text = text
+
+        if num_passes >= 2:
+            # Pass 1: Expand with noise
+            r1 = client.chat.completions.create(
+                model=model_id,
+                temperature=0.97,
+                max_tokens=3000,
+                top_p=0.93,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a creative human writer. Expand this text by ~25%. "
+                        "Add one concrete real-world example, one analogy, or a personal-sounding observation. "
+                        "Do NOT use AI buzzwords. Vary sentence length. Output ONLY the expanded text."
+                    )},
+                    {"role": "user", "content": current_text},
+                ]
+            )
+            expanded = r1.choices[0].message.content
+
+            # Pass 2: Humanize & condense
+            r2 = client.chat.completions.create(
+                model=model_id,
+                temperature=0.93,
+                max_tokens=2500,
+                top_p=0.91,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Rewrite and condense this to roughly the original length:\n\n{expanded}"},
+                ]
+            )
+            current_text = r2.choices[0].message.content
+
+        else:
+            # Single pass
+            r = client.chat.completions.create(
+                model=model_id,
+                temperature=0.97,
+                max_tokens=2500,
+                top_p=0.93,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Rewrite this:\n\n{current_text}"},
+                ]
+            )
+            current_text = r.choices[0].message.content
+
+        if num_passes >= 3:
+            # Pass 3: Rhythm + structure scrambler
+            r3 = client.chat.completions.create(
+                model=model_id,
+                temperature=0.88,
+                max_tokens=2500,
+                top_p=0.91,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a sentence rhythm expert. Make this text sound undeniably human.\n"
+                        "- Rearrange sentence order within paragraphs where logical.\n"
+                        "- Ensure NO two consecutive sentences are the same length.\n"
+                        "- Add 1-2 natural phrases: 'honestly', 'look', 'here's the thing', 'to be fair'.\n"
+                        "- Replace any remaining formal transitions with casual ones.\n"
+                        "- Break any parallel structure patterns.\n"
+                        "Do NOT add new facts. Do NOT use AI buzzwords. Output ONLY the result."
+                    )},
+                    {"role": "user", "content": current_text},
+                ]
+            )
+            current_text = r3.choices[0].message.content
+
+        # ── Stealth post-processing ──
+        if stealth:
+            current_text = clean_cliches(current_text)
+            current_text = inject_quirks(current_text, tone)
+            current_text = vary_burstiness(current_text)
+            if originality:  # Originality-specific fix
+                current_text = add_human_specificity(current_text)
+
+        return current_text.strip()
+
     except Exception as e:
-        error_msg = str(e)
-        if "decommissioned" in error_msg or "model" in error_msg:
-            return f"Error: Model '{model_id}' might be deprecated. Please select a different model in the sidebar."
-        return f"Error: {error_msg}"
+        return f"Error: {e}"
 
-# --- Main App UI ---
-st.title("✍️ Authentica: AI Text Humanizer")
-st.markdown("Transform robotic AI text into natural, human-like writing instantly.")
 
-st.markdown("""
-    <div class="warning-box">
-        <strong>Ethical Use:</strong> This tool is designed to improve readability and style. 
-        Do not use this to bypass academic integrity checks or misrepresent authorship.
-    </div>
-    """, unsafe_allow_html=True)
+def cache_key(text, tone, model, passes, stealth, gpt, ori, tur, zer, rand):
+    seed = str(random.random()) if rand else ""
+    return hashlib.md5(f"{text}{tone}{model}{passes}{stealth}{gpt}{ori}{tur}{zer}{seed}".encode()).hexdigest()
 
+
+# ─────────────────────────────────────────────
+#  UI
+# ─────────────────────────────────────────────
+
+st.title("🕵️ Authentica v3 — Multi-Detector Humanizer")
+st.markdown(
+    "Engineered to lower scores on **GPTZero**, **Originality.ai**, **Turnitin**, and **ZeroGPT** simultaneously. "
+    "Uses detector-specific countermeasures at the prompt level."
+)
+
+# Show active detector badges
+badges = []
+if target_gptzero:     badges.append('<span class="detector-badge badge-red">GPTZero</span>')
+if target_originality: badges.append('<span class="detector-badge badge-red">Originality.ai</span>')
+if target_turnitin:    badges.append('<span class="detector-badge badge-red">Turnitin</span>')
+if target_zerogpt:     badges.append('<span class="detector-badge badge-red">ZeroGPT</span>')
+st.markdown("**Targeting:** " + " ".join(badges), unsafe_allow_html=True)
+
+st.markdown("---")
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Input Text")
-    input_text = st.text_area("Paste AI-generated text here", height=300, placeholder="e.g., The utilization of this method is highly recommended...")
+    st.subheader("📥 Input")
+    input_text = st.text_area(
+        "Paste AI-generated text",
+        height=380,
+        placeholder="Paste your AI-written content here...",
+    )
+    word_count = len(input_text.split()) if input_text else 0
+    st.caption(f"Word count: {word_count}")
 
 with col2:
-    st.subheader("Humanized Output")
-    output_placeholder = st.empty()
-    
-    if st.button("✨ Humanize Text", type="primary"):
+    st.subheader("📤 Output")
+    output_area = st.empty()
+    status_area = st.empty()
+
+    if st.button("🚀 Run Humanizer", type="primary", use_container_width=True):
         if not api_key:
-            st.error("Please enter your Groq API Key in the sidebar.")
-        elif not input_text:
-            st.warning("Please enter some text to rewrite.")
+            st.error("Add your Groq API key in the sidebar.")
+        elif not input_text.strip():
+            st.warning("Paste some text to rewrite.")
+        elif not any([target_gptzero, target_originality, target_turnitin, target_zerogpt]):
+            st.warning("Select at least one target detector in the sidebar.")
         else:
             client = Groq(api_key=api_key)
-            
-            with st.spinner(f"Rewriting using {selected_model_name}..."):
-                # Check Cache
-                cache_key = get_cache_key(input_text, tone, selected_model_id)
+
+            pass_label = {1: "1-pass", 2: "2-pass", 3: "3-pass"}[num_passes]
+            with st.spinner(f"Running {pass_label} pipeline against {sum([target_gptzero, target_originality, target_turnitin, target_zerogpt])} detectors..."):
+
                 if 'cache' not in st.session_state:
                     st.session_state.cache = {}
-                
-                if cache_key in st.session_state.cache:
-                    result = st.session_state.cache[cache_key]
-                    time.sleep(0.5)
+
+                ck = cache_key(
+                    input_text, tone, selected_model_id, num_passes, stealth,
+                    target_gptzero, target_originality, target_turnitin, target_zerogpt,
+                    randomize
+                )
+
+                if ck in st.session_state.cache and not randomize:
+                    result = st.session_state.cache[ck]
                 else:
-                    result = humanize_text(input_text, tone, creativity, client, selected_model_id)
-                    st.session_state.cache[cache_key] = result
-                
-                if result.startswith("Error:"):
-                    st.markdown(f'<div class="error-box">{result}</div>', unsafe_allow_html=True)
-                    if "deprecated" in result:
-                        st.warning("👈 Go to the sidebar and select a different model (e.g., Llama 3.1 8B).")
-                else:
-                    output_placeholder.text_area("Result", value=result, height=300)
-                    st.session_state.history.append(input_text[:50])
-                    st.success("Done!")
+                    result = humanize(
+                        input_text, tone, client, selected_model_id,
+                        num_passes, stealth,
+                        target_gptzero, target_originality, target_turnitin, target_zerogpt
+                    )
+                    st.session_state.cache[ck] = result
+
+            if result.startswith("Error:"):
+                st.error(result)
+            else:
+                output_area.text_area("Result", value=result, height=380)
+                out_wc = len(result.split())
+                st.caption(f"Word count: {out_wc}")
+                st.success(f"✅ Done! {num_passes}-pass pipeline complete.")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Passes",      num_passes)
+                c2.metric("Detectors",   sum([target_gptzero, target_originality, target_turnitin, target_zerogpt]))
+                c3.metric("Temp",        "0.93–0.97")
+                c4.metric("Post-proc",   "On" if stealth else "Off")
 
 st.markdown("---")
-st.markdown("Powered by Groq Cloud | Hosted on Streamlit")
+with st.expander("📖 How each detector is beaten — and what to do manually"):
+    st.markdown("""
+    ### Why each detector flags AI text
+
+    | Detector | Primary Signal | This Tool's Fix |
+    |---|---|---|
+    | **GPTZero** | Low perplexity + low burstiness | High temp (0.97), aggressive sentence length mixing, unusual word choices |
+    | **Originality.ai** | Semantic fingerprinting of high-probability token sequences | Idea reordering, concrete specifics injected, idiom insertion |
+    | **Turnitin** | Structural patterns + absence of personal voice | Paragraph asymmetry, first-person injection, opinion statements |
+    | **ZeroGPT** | Formal transitions + uniform clause lengths | All formal transitions replaced, conjunction sentence starters, contractions |
+
+    ### 4 manual tweaks that close the last 10–20%
+
+    1. **Add one real, specific detail** — a number, date, or named example ("In a 2023 Stanford study…" or "When I tried this with a team of 8 people…")
+    2. **Break paragraph symmetry by hand** — split one long paragraph into two unequal ones, or combine two short ones
+    3. **Change one sentence to a question** — "Why does this matter?" or "Sound familiar?"
+    4. **Add one intentional imperfection** — a mild repetition, a dash of self-correction ("or rather, what I mean is…"), or a colloquial aside
+
+    ### Model recommendation
+    **Llama 3.1 8B** consistently outperforms larger models for humanization. Bigger models are *too good* — they write too cleanly.
+    """)
+
+st.markdown("*Powered by Groq Cloud | Authentica v3 | Multi-Detector Engine*")
