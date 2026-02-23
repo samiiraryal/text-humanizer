@@ -61,7 +61,8 @@ def humanize_text(text, tone, creativity, client):
                     "content": f"Please humanize this text:\n\n{text}"
                 }
             ],
-            model="llama3-70b-8192", # High quality free model on Groq
+            # UPDATED MODEL ID BELOW
+            model="llama-3.1-70b-versatile", 
             temperature=creativity,
             max_tokens=2048,
             top_p=1.0,
@@ -125,4 +126,4 @@ with col2:
 
 # Footer
 st.markdown("---")
-st.markdown("Powered by Llama 3 70B via Groq Cloud | Hosted on Streamlit")
+st.markdown("Powered by Llama 3.1 70B via Groq Cloud | Hosted on Streamlit")
