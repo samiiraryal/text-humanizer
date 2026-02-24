@@ -40,9 +40,9 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Model")
     model_options = {
-        "Llama 3.1 8B — Best Human Feel":    "llama-3.1-8b-instant",
-        "Llama 3.3 70B — Most Intelligent":  "llama-3.3-70b-versatile",
-        "Mixtral 8x7B — Alternative":        "mixtral-8x7b-32768",
+        "Llama 3.3 70B — Most Intelligent (Recommended for General Content)": "llama-3.3-70b-versatile",
+        "Llama 3.1 8B — Faster but Less Powerful":       "llama-3.1-8b-instant",
+        "Mixtral 8x7B — Alternative":                    "mixtral-8x7b-32768",
     }
     selected_model_name = st.selectbox("Model", list(model_options.keys()))
     selected_model_id   = model_options[selected_model_name]
@@ -56,7 +56,7 @@ with st.sidebar:
         "Cover Letter / Application",
     ])
     st.caption({
-        "General Content (Blog / Article / Essay)":    "✅ Full stealth pipeline — aggressive humanization",
+        "General Content (Blog / Article / Essay)":    "✅ Full stealth pipeline — aggressive humanization (4 passes, high temp, heavy post‑proc)",
         "Professional Email":                          "⚠️ Restrained pipeline — keeps formal tone, fixes AI tells only",
         "Academic / Research Writing":                 "⚠️ Conservative pipeline — preserves structure and citations",
         "Cover Letter / Application":                  "⚠️ Restrained pipeline — professional voice, no fabrications",
@@ -79,13 +79,13 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Pipeline")
     num_passes  = st.slider("Rewrite Passes", 1, 3, 3,
-                             help="3 passes gives the lowest detection scores")
+                             help="For General Content, 4 passes are always used regardless of this setting.")
     stealth     = st.checkbox("Stealth Post-Processing", value=True)
     randomize   = st.checkbox("Randomize on Each Run",   value=True,
                                help="Disables cache so each run is unique")
 
     st.markdown("---")
-    st.info("🏆 Best combo: **8B + 3 passes + Stealth**, all detectors checked.")
+    st.info("🏆 Best combo for General Content: **4 passes + Stealth**, all detectors checked.")
     st.warning("⚠️ For legitimate content work only.")
 
 
@@ -341,7 +341,7 @@ RULES:
 
 
 # ─────────────────────────────────────────────
-#  POST-PROCESSING
+#  ORIGINAL POST-PROCESSING (kept for compatibility)
 # ─────────────────────────────────────────────
 
 def inject_quirks(text: str, tone: str) -> str:
@@ -361,13 +361,11 @@ def inject_quirks(text: str, tone: str) -> str:
     modified = []
     for i, sent in enumerate(sentences):
         s = sent.strip()
-        # Apply contractions
         if tone in ("Conversational & Raw", "Opinionated Blog", "Storyteller"):
             for long, short in contractions.items():
                 if long in s:
                     s = s.replace(long, short, 1)
 
-        # Randomly start with conjunction (natural speech)
         if i > 0 and random.random() < 0.18:
             if not re.match(r'^(And |But |So |Yet |Or |Look,|Plus,)', s):
                 prefix = random.choice(["And ", "But ", "So "])
@@ -387,7 +385,6 @@ def vary_burstiness(text: str) -> str:
         s = sentences[i]
         wc = len(s.split())
 
-        # Split long sentences
         if wc > 28 and random.random() < 0.65:
             split_done = False
             for splitter in [' and ', ' which ', ' because ', ' but ', ' while ', ' although ']:
@@ -402,7 +399,6 @@ def vary_burstiness(text: str) -> str:
             if not split_done:
                 result.append(s)
 
-        # Merge two short sentences
         elif wc < 7 and i + 1 < len(sentences) and len(sentences[i+1].split()) < 7 and random.random() < 0.45:
             next_s = sentences[i+1]
             merged = s.rstrip('.!?') + ', ' + next_s[0].lower() + next_s[1:]
@@ -423,7 +419,6 @@ def add_human_specificity(text: str) -> str:
     Injecting a plausible-sounding specific detail raises the human score.
     """
     specifics = [
-        # These are natural-sounding asides a human might add
         " — and I've seen this firsthand",
         " — which, in practice, makes a real difference",
         ", and that's not a small thing",
@@ -434,13 +429,148 @@ def add_human_specificity(text: str) -> str:
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     if len(sentences) < 4:
         return text
-    # Insert into a middle sentence, at a natural break
     target_idx = random.randint(1, max(1, len(sentences) // 2))
     s = sentences[target_idx]
     if len(s.split()) > 10 and s.endswith('.'):
         aside = random.choice(specifics)
         sentences[target_idx] = s[:-1] + aside + '.'
     return ' '.join(sentences)
+
+
+# ===== NEW AGGRESSIVE POST‑PROCESSING FOR GENERAL CONTENT =====
+
+def aggressive_burstiness(text: str) -> str:
+    """Much more aggressive sentence splitting/merging + occasional fragments."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if len(sentences) < 3:
+        return text
+
+    new_sents = []
+    i = 0
+    while i < len(sentences):
+        s = sentences[i].strip()
+        wc = len(s.split())
+
+        # Split ANY sentence > 18 words at a conjunction or comma (80% chance)
+        if wc > 18 and random.random() < 0.8:
+            split_at = None
+            for conj in [' and ', ' but ', ' because ', ' so ', ' however,', ' although ', ' while ']:
+                pos = s.lower().find(conj)
+                if pos != -1 and pos > 8 and pos < len(s) - 8:
+                    split_at = pos + len(conj.rstrip(','))
+                    break
+            if split_at is None:
+                comma_pos = s.find(',')
+                if comma_pos != -1 and comma_pos > 8:
+                    split_at = comma_pos + 1
+            if split_at:
+                part1 = s[:split_at].rstrip(',').strip() + '.'
+                part2 = s[split_at:].strip()
+                if part2:
+                    part2 = part2[0].upper() + part2[1:]
+                    new_sents.extend([part1, part2])
+                    i += 1
+                    continue
+
+        # Merge very short sentences (< 6 words) with next if possible
+        if wc < 6 and i + 1 < len(sentences):
+            next_s = sentences[i+1].strip()
+            if len(next_s.split()) < 10:
+                merged = s.rstrip('.!?') + ', ' + next_s[0].lower() + next_s[1:]
+                new_sents.append(merged)
+                i += 2
+                continue
+
+        new_sents.append(s)
+        i += 1
+
+    # 25% chance to insert a sentence fragment
+    if random.random() < 0.25:
+        idx = random.randint(0, len(new_sents)-1)
+        frag = random.choice(["Exactly.", "Right.", "True.", "I know.", "Fair enough.", "No question."])
+        new_sents.insert(idx, frag)
+
+    return ' '.join(new_sents)
+
+
+def inject_colloquialisms(text: str) -> str:
+    """Replace formal transitions and add casual sentence starters."""
+    # Hard replacements for common formal transitions
+    text = re.sub(r'\bHowever,?\b', random.choice(["But", "Still,", "That said,"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bTherefore,?\b', random.choice(["So", "That means", "As a result"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bFurthermore,?\b', random.choice(["Plus,", "Also,", "And"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bMoreover,?\b', random.choice(["Plus,", "On top of that,", "Also,"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bIn addition,?\b', random.choice(["Also,", "Plus,", "And"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bConsequently,?\b', random.choice(["So,", "Because of that,", "That's why"]), text, flags=re.IGNORECASE)
+    text = re.sub(r'\bNevertheless,?\b', random.choice(["Still,", "Even so,", "But"]), text, flags=re.IGNORECASE)
+
+    # Insert casual starters in the middle of the text
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    if len(sentences) > 3:
+        idx = random.randint(1, len(sentences)-2)
+        starter = random.choice(["Honestly, ", "Look, ", "I mean, ", "You know, ", "Actually, ", "Here's the thing: "])
+        sentences[idx] = starter + sentences[idx][0].lower() + sentences[idx][1:]
+    return ' '.join(sentences)
+
+
+# Small thesaurus for common AI words
+SYNONYM_MAP = {
+    'important': ['key', 'crucial', 'vital', 'essential', 'big'],
+    'significant': ['major', 'substantial', 'considerable', 'notable'],
+    'demonstrate': ['show', 'prove', 'illustrate', 'highlight'],
+    'provide': ['give', 'offer', 'supply', 'deliver'],
+    'develop': ['build', 'create', 'form', 'put together'],
+    'utilize': ['use', 'employ', 'apply'],
+    'implement': ['put in place', 'roll out', 'carry out'],
+    'facilitate': ['help', 'enable', 'make easier'],
+    'numerous': ['many', 'countless', 'several', 'a lot of'],
+    'prior to': ['before'],
+    'subsequent': ['later', 'following'],
+    'commence': ['start', 'begin'],
+    'terminate': ['end', 'stop'],
+}
+
+def synonym_replacement(text: str) -> str:
+    """Replace overused words with synonyms (40% chance per occurrence)."""
+    words = text.split()
+    new_words = []
+    for w in words:
+        lower = w.lower().strip('.,!?;:')
+        if lower in SYNONYM_MAP and random.random() < 0.4:
+            replacement = random.choice(SYNONYM_MAP[lower])
+            # Preserve case
+            if w[0].isupper():
+                replacement = replacement.capitalize()
+            # Reattach punctuation
+            punct = ''
+            if w[-1] in '.,!?;:':
+                punct = w[-1]
+            new_words.append(replacement + punct)
+        else:
+            new_words.append(w)
+    return ' '.join(new_words)
+
+
+def add_minor_imperfections(text: str) -> str:
+    """Introduce tiny grammar/punctuation 'errors' that humans make."""
+    # 20% chance to replace a period with a comma (creating a comma splice)
+    if random.random() < 0.2:
+        text = re.sub(r'\.\s+([A-Z])', r', \1', text, count=1)
+    # 15% chance to remove an Oxford comma
+    if random.random() < 0.15:
+        text = re.sub(r', and', ' and', text, count=1)
+    # 10% chance to add a random comma inside a sentence
+    if random.random() < 0.1:
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        if len(sentences) > 1:
+            idx = random.randint(0, len(sentences)-1)
+            words = sentences[idx].split()
+            if len(words) > 5:
+                pos = random.randint(2, len(words)-2)
+                words.insert(pos, ',')
+                sentences[idx] = ' '.join(words)
+        text = ' '.join(sentences)
+    return text
 
 
 # ─────────────────────────────────────────────
@@ -481,93 +611,100 @@ def humanize(text, tone, doc_type, client, model_id, num_passes, stealth, gptzer
         except Exception as e:
             return f"Error: {e}"
 
-    # ── General content path: full aggressive pipeline ──
+    # ── General content path: full aggressive pipeline (4 passes, forced 70B) ──
     system_prompt = build_system_prompt(tone, gptzero, originality, turnitin, zerogpt)
+
+    # Force the best model for general content
+    general_model = "llama-3.3-70b-versatile"
 
     try:
         current_text = text
 
-        if num_passes >= 2:
-            # Pass 1: Expand with noise
-            r1 = client.chat.completions.create(
-                model=model_id,
-                temperature=0.97,
-                max_tokens=3000,
-                top_p=0.93,
-                messages=[
-                    {"role": "system", "content": (
-                        "You are a creative human writer. Expand this text by ~25%. "
-                        "Add one concrete real-world example, one analogy, or a personal-sounding observation. "
-                        "Do NOT use AI buzzwords. Vary sentence length. Output ONLY the expanded text."
-                    )},
-                    {"role": "user", "content": current_text},
-                ]
-            )
-            expanded = r1.choices[0].message.content
+        # --- PASS 1: Wild expansion (high temp, add noise) ---
+        r1 = client.chat.completions.create(
+            model=general_model,
+            temperature=1.5,
+            max_tokens=3500,
+            top_p=0.98,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a wildly creative human writer. Expand this text by about 40%. "
+                    "Add a personal story, a vivid analogy, an opinion, and a rhetorical question. "
+                    "Use very casual, conversational language. Vary sentence lengths like crazy. "
+                    "Do NOT use any AI buzzwords. Output ONLY the expanded text."
+                )},
+                {"role": "user", "content": current_text},
+            ]
+        )
+        expanded = r1.choices[0].message.content
 
-            # Pass 2: Humanize & condense
-            r2 = client.chat.completions.create(
-                model=model_id,
-                temperature=0.93,
-                max_tokens=2500,
-                top_p=0.91,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Rewrite and condense this to roughly the original length:\n\n{expanded}"},
-                ]
-            )
-            current_text = r2.choices[0].message.content
+        # --- PASS 2: Humanize with detector-specific instructions ---
+        r2 = client.chat.completions.create(
+            model=general_model,
+            temperature=1.4,
+            max_tokens=3000,
+            top_p=0.96,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Rewrite and condense this to roughly the original length. Make it sound like a smart human wrote it casually:\n\n{expanded}"},
+            ]
+        )
+        current_text = r2.choices[0].message.content
 
-        else:
-            # Single pass
-            r = client.chat.completions.create(
-                model=model_id,
-                temperature=0.97,
-                max_tokens=2500,
-                top_p=0.93,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Rewrite this:\n\n{current_text}"},
-                ]
-            )
-            current_text = r.choices[0].message.content
+        # --- PASS 3: Rhythm & structure scrambler ---
+        r3 = client.chat.completions.create(
+            model=general_model,
+            temperature=1.3,
+            max_tokens=3000,
+            top_p=0.94,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a sentence rhythm expert. Your task: make this text sound undeniably human.\n"
+                    "- Rearrange sentence order within paragraphs if it feels natural.\n"
+                    "- Ensure NO two consecutive sentences are the same length.\n"
+                    "- Add 2-3 casual phrases: 'honestly', 'look', 'here's the thing', 'to be fair', 'I mean'.\n"
+                    "- Replace any remaining formal transitions with casual ones (But, So, Plus, etc.).\n"
+                    "- Break any parallel structure patterns.\n"
+                    "- If a sentence feels too perfect, add a tiny imperfection (e.g., a comma splice or a slight run-on).\n"
+                    "Do NOT add new facts. Output ONLY the result."
+                )},
+                {"role": "user", "content": current_text},
+            ]
+        )
+        current_text = r3.choices[0].message.content
 
-        if num_passes >= 3:
-            # Pass 3: Rhythm + structure scrambler
-            r3 = client.chat.completions.create(
-                model=model_id,
-                temperature=0.88,
-                max_tokens=2500,
-                top_p=0.91,
-                messages=[
-                    {"role": "system", "content": (
-                        "You are a sentence rhythm expert. Make this text sound undeniably human.\n"
-                        "- Rearrange sentence order within paragraphs where logical.\n"
-                        "- Ensure NO two consecutive sentences are the same length.\n"
-                        "- Add 1-2 natural phrases: 'honestly', 'look', 'here's the thing', 'to be fair'.\n"
-                        "- Replace any remaining formal transitions with casual ones.\n"
-                        "- Break any parallel structure patterns.\n"
-                        "Do NOT add new facts. Do NOT use AI buzzwords. Output ONLY the result."
-                    )},
-                    {"role": "user", "content": current_text},
-                ]
-            )
-            current_text = r3.choices[0].message.content
+        # --- PASS 4: Final anti-detection polish (lower temp for coherence) ---
+        r4 = client.chat.completions.create(
+            model=general_model,
+            temperature=1.0,
+            max_tokens=3000,
+            top_p=0.92,
+            messages=[
+                {"role": "system", "content": (
+                    "You are an expert at evading AI detectors. Final polish:\n"
+                    "- Eliminate any remaining overused transition words.\n"
+                    "- Vary sentence length even more.\n"
+                    "- Insert one tangential thought or a slight self-correction.\n"
+                    "- Replace one or two common words with unexpected synonyms.\n"
+                    "- Ensure contractions are used naturally.\n"
+                    "Output ONLY the final version."
+                )},
+                {"role": "user", "content": current_text},
+            ]
+        )
+        current_text = r4.choices[0].message.content
 
-        # ── Stealth post-processing (general content only) ──
+        # --- STEALTH POST-PROCESSING (only for general content) ---
         if stealth:
-            current_text = clean_cliches(current_text)
-            current_text = inject_quirks(current_text, tone)
-            current_text = vary_burstiness(current_text)
+            current_text = clean_cliches(current_text)               # remove buzzwords
+            current_text = aggressive_burstiness(current_text)       # extreme sentence variation
+            current_text = inject_colloquialisms(current_text)       # casual tone
+            current_text = synonym_replacement(current_text)         # shuffle vocabulary
             if originality:
-                current_text = add_human_specificity(current_text)
+                current_text = add_human_specificity(current_text)   # concrete details
+            current_text = add_minor_imperfections(current_text)     # human‑like errors
 
         return current_text.strip()
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
 
     except Exception as e:
         return f"Error: {e}"
@@ -585,7 +722,7 @@ def cache_key(text, tone, doc_type, model, passes, stealth, gpt, ori, tur, zer, 
 st.title("🕵️ Authentica v3 — Multi-Detector Humanizer")
 st.markdown(
     "Engineered to lower scores on **GPTZero**, **Originality.ai**, **Turnitin**, and **ZeroGPT**. "
-    "Uses **document-type-aware** pipelines — formal docs get a restrained edit; general content gets the full stealth treatment."
+    "Uses **document-type-aware** pipelines — formal docs get a restrained edit; general content gets the full stealth treatment (4 passes, high temp, heavy post‑proc)."
 )
 
 # Show active detector badges
@@ -624,7 +761,7 @@ with col2:
         else:
             client = Groq(api_key=api_key)
 
-            pass_label = "1-pass (restrained)" if is_formal_doc(doc_type) else {1: "1-pass", 2: "2-pass", 3: "3-pass"}[num_passes]
+            pass_label = "1-pass (restrained)" if is_formal_doc(doc_type) else "4-pass (aggressive)"
             with st.spinner(f"Running {pass_label} pipeline — {doc_type}..."):
 
                 if 'cache' not in st.session_state:
@@ -652,11 +789,11 @@ with col2:
                 output_area.text_area("Result", value=result, height=380)
                 out_wc = len(result.split())
                 st.caption(f"Word count: {out_wc}")
-                st.success(f"✅ Done! {num_passes}-pass pipeline complete.")
+                st.success(f"✅ Done! {pass_label} pipeline complete.")
 
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Pipeline",    "Restrained" if is_formal_doc(doc_type) else "Full Stealth")
-                c2.metric("Passes",      1 if is_formal_doc(doc_type) else num_passes)
+                c2.metric("Passes",      1 if is_formal_doc(doc_type) else 4)
                 c3.metric("Detectors",   sum([target_gptzero, target_originality, target_turnitin, target_zerogpt]))
                 c4.metric("Post-proc",   "On" if stealth else "Off")
 
@@ -667,7 +804,7 @@ with st.expander("📖 How it works — two pipelines explained"):
 
     | Document Type | Pipeline | Temperature | Post-processing |
     |---|---|---|---|
-    | **General Content** (Blog/Article/Essay) | Full 3-pass stealth | 0.93–0.97 | Clichés + quirks + burstiness |
+    | **General Content** (Blog/Article/Essay) | Full 4-pass stealth | 1.0–1.5 | Aggressive burstiness + colloquialisms + synonyms + minor errors |
     | **Professional Email** | Single-pass restrained | 0.55 | Clichés only |
     | **Academic Writing** | Single-pass restrained | 0.55 | Clichés only |
     | **Cover Letter** | Single-pass restrained | 0.55 | Clichés only |
@@ -681,10 +818,10 @@ with st.expander("📖 How it works — two pipelines explained"):
 
     | Detector | Primary Signal | This Tool's Fix |
     |---|---|---|
-    | **GPTZero** | Low perplexity + low burstiness | High temp (0.97), aggressive sentence length mixing |
-    | **Originality.ai** | Semantic fingerprinting | Idea reordering, concrete specifics injected, idioms |
-    | **Turnitin** | Structural patterns + no personal voice | Paragraph asymmetry, opinion statements |
-    | **ZeroGPT** | Formal transitions + uniform clause lengths | All formal transitions replaced, contractions |
+    | **GPTZero** | Low perplexity + low burstiness | High temp (1.5), extreme sentence length mixing, fragments |
+    | **Originality.ai** | Semantic fingerprinting | Idea reordering, concrete specifics injected, idioms, synonym replacement |
+    | **Turnitin** | Structural patterns + no personal voice | Paragraph asymmetry, opinion statements, colloquialisms |
+    | **ZeroGPT** | Formal transitions + uniform clause lengths | All formal transitions replaced, contractions, minor errors |
 
     ### 4 manual tweaks that close the last gap
 
