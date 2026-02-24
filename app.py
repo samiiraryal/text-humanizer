@@ -1,447 +1,680 @@
+"""
+Authentica v5 — AI Text Humanizer
+Fixes applied vs v4:
+  1. Removed ALL contraction injection (it's now a detection signal)
+  2. Added Google Gemini 2.0 Flash as free provider option
+  3. Added copy button for output text
+  4. Added 20 content-type options across 5 groups
+  5. Real structural-level rewriting via deep prompt engineering, NOT word-swapping
+  6. Post-processing stripped back to cliché removal only (no synonym swaps, no injections)
+  7. Added Quillbot to detector targeting list
+  8. Fixed rogue-dot artifacts, cache key logic, fragment injection
+"""
+
 import streamlit as st
-from groq import Groq
 import hashlib
 import re
 import random
+import time
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Authentica v4 | AI Humanizer",
-    page_icon="🖊️",
+    page_title="Authentica v5",
+    page_icon="✍️",
     layout="wide",
 )
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Lato:wght@300;400;700&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
+*, html, body, [class*="css"] {
+    font-family: 'Lato', sans-serif !important;
 }
-h1, h2, h3 {
-    font-family: 'DM Serif Display', serif;
+h1, h2, h3, .brand {
+    font-family: 'Syne', sans-serif !important;
 }
 
-.main { background: #f8f7f4; }
+.stApp { background: #0f0f13; }
+section[data-testid="stSidebar"] { background: #16161f !important; border-right: 1px solid #2a2a3a; }
+section[data-testid="stSidebar"] * { color: #ccc !important; }
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stCheckbox label,
+section[data-testid="stSidebar"] .stRadio label { color: #aaa !important; font-size: 13px !important; }
+
+.main-header {
+    background: linear-gradient(135deg, #1a0533 0%, #0d1a3a 50%, #001a1a 100%);
+    border: 1px solid #2a2a4a;
+    border-radius: 16px;
+    padding: 32px 40px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+}
+.main-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle at 30% 50%, rgba(120,60,255,0.08) 0%, transparent 50%),
+                radial-gradient(circle at 70% 50%, rgba(0,180,255,0.06) 0%, transparent 50%);
+    pointer-events: none;
+}
+.brand-title {
+    font-family: 'Syne', sans-serif !important;
+    font-size: 36px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: -1px;
+    margin: 0;
+}
+.brand-sub {
+    color: #8888aa;
+    font-size: 14px;
+    margin-top: 6px;
+    letter-spacing: 0.05em;
+}
+.brand-accent { color: #a855f7; }
 
 .badge {
     display: inline-block;
-    padding: 3px 10px;
+    padding: 4px 12px;
     border-radius: 20px;
     font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    margin: 2px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin: 3px;
+    border: 1px solid;
 }
-.badge-active   { background: #1a1a2e; color: #fff; }
-.badge-inactive { background: #e8e8e8; color: #888; }
+.badge-on  { background: rgba(168,85,247,0.15); color: #a855f7; border-color: rgba(168,85,247,0.4); }
+.badge-off { background: rgba(255,255,255,0.04); color: #555; border-color: rgba(255,255,255,0.08); }
 
-.pipeline-card {
-    background: #fff;
-    border: 1px solid #e5e5e5;
-    border-radius: 12px;
-    padding: 16px 20px;
-    margin-bottom: 12px;
+.panel {
+    background: #16161f;
+    border: 1px solid #2a2a3a;
+    border-radius: 14px;
+    padding: 20px;
 }
-.pipeline-title {
-    font-weight: 600;
-    font-size: 14px;
-    color: #1a1a2e;
-    margin-bottom: 4px;
+.panel-title {
+    font-family: 'Syne', sans-serif !important;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #666;
+    margin-bottom: 14px;
 }
-.pipeline-desc {
+
+.ct-pill {
+    display: inline-block;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: #aaa;
+    margin: 3px;
+    cursor: pointer;
+}
+.ct-pill-active {
+    background: rgba(168,85,247,0.2);
+    border-color: rgba(168,85,247,0.5);
+    color: #c084fc;
+}
+
+.info-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 8px 14px;
     font-size: 12px;
     color: #888;
+    margin: 4px 0;
 }
+.info-chip-val { color: #c084fc; font-weight: 700; }
 
 .stButton > button {
-    background: #1a1a2e !important;
-    color: #fff !important;
+    background: linear-gradient(135deg, #7c3aed, #a855f7) !important;
+    color: white !important;
     border: none !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
-    font-family: 'DM Sans', sans-serif !important;
-    letter-spacing: 0.02em !important;
+    border-radius: 10px !important;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 700 !important;
+    font-size: 15px !important;
+    padding: 14px 20px !important;
+    letter-spacing: 0.04em !important;
+    transition: all 0.2s !important;
+    box-shadow: 0 4px 20px rgba(168,85,247,0.3) !important;
 }
 .stButton > button:hover {
-    background: #2d2d50 !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 28px rgba(168,85,247,0.45) !important;
 }
 
 div[data-testid="stTextArea"] textarea {
-    border-radius: 10px;
-    border: 1.5px solid #e0e0e0;
-    font-family: 'DM Sans', sans-serif;
-    font-size: 14px;
+    background: #0f0f18 !important;
+    border: 1.5px solid #2a2a3a !important;
+    border-radius: 10px !important;
+    color: #e0e0e8 !important;
+    font-family: 'Lato', sans-serif !important;
+    font-size: 14px !important;
+    line-height: 1.7 !important;
 }
 div[data-testid="stTextArea"] textarea:focus {
-    border-color: #1a1a2e;
-    box-shadow: 0 0 0 2px rgba(26,26,46,0.1);
+    border-color: #7c3aed !important;
+    box-shadow: 0 0 0 3px rgba(124,58,237,0.15) !important;
+}
+div[data-testid="stTextArea"] label { color: #666 !important; font-size: 11px !important; }
+
+.copy-box {
+    background: #0f0f18;
+    border: 1.5px solid #2a2a3a;
+    border-radius: 10px;
+    padding: 16px;
+    color: #e0e0e8;
+    font-family: 'Lato', sans-serif;
+    font-size: 14px;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    max-height: 420px;
+    overflow-y: auto;
+    position: relative;
 }
 
-.tip-card {
-    background: #eef2ff;
-    border-left: 4px solid #1a1a2e;
-    border-radius: 6px;
-    padding: 12px 16px;
-    font-size: 13px;
-    color: #333;
-    margin: 10px 0;
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-top: 14px;
 }
-
-.stat-row {
-    display: flex;
-    gap: 12px;
-    margin-top: 8px;
-}
-.stat-box {
-    flex: 1;
-    background: #f0f0f5;
-    border-radius: 8px;
-    padding: 10px 14px;
+.stat-card {
+    background: #1a1a28;
+    border: 1px solid #2a2a3a;
+    border-radius: 10px;
+    padding: 12px;
     text-align: center;
 }
-.stat-value { font-size: 20px; font-weight: 700; color: #1a1a2e; }
-.stat-label { font-size: 11px; color: #888; }
+.stat-val { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800; color: #a855f7; }
+.stat-lbl { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+
+div[data-testid="stSelectbox"] > div { background: #16161f !important; border-color: #2a2a3a !important; color: #ccc !important; }
+div[data-testid="stSelectbox"] label { color: #888 !important; font-size: 12px !important; }
+.stRadio label { color: #bbb !important; font-size: 13px !important; }
+.stCheckbox label { color: #bbb !important; }
+.stTextInput > div > div > input { background: #0f0f18 !important; border-color: #2a2a3a !important; color: #ccc !important; }
+
+.section-label {
+    font-family: 'Syne', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #444;
+    margin-bottom: 10px;
+    margin-top: 20px;
+}
+.wc-display { color: #555; font-size: 12px; margin-top: 6px; }
+
+.tip-row {
+    background: rgba(168,85,247,0.07);
+    border-left: 3px solid #7c3aed;
+    border-radius: 0 8px 8px 0;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #9070c0;
+    margin: 8px 0;
+}
+
+.success-bar {
+    background: rgba(34,197,94,0.1);
+    border: 1px solid rgba(34,197,94,0.25);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: #4ade80;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 10px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
-#  CONTENT TYPE DEFINITIONS
+#  CONTENT TYPES — 20 options across 5 groups
 # ─────────────────────────────────────────────
 
 CONTENT_TYPES = {
-    # ── Academic ──────────────────────────────
+
+    # ══ ACADEMIC ══════════════════════════════════════════════
     "📄 Statement of Purpose (SOP)": {
         "group": "Academic",
         "pipeline": "formal",
-        "desc": "Graduate school / university admission",
         "tone_locked": "Reflective & Personal",
-        "system_prompt": """You are an expert SOP editor. Your job is to make this Statement of Purpose sound authentically human — like a real applicant wrote it after deep reflection.
+        "system": """You are an elite SOP editor. Rewrite this to sound like a real, thoughtful applicant wrote it after months of reflection.
 
-STRICT RULES — follow every one:
-1. Keep ALL facts, credentials, GPA, research projects, internships, and career goals exactly as stated. NEVER fabricate anything.
-2. Write in warm first-person voice. Use "I" naturally throughout.
-3. Add genuine-sounding personal motivation — but ONLY if it can be inferred from existing content. Never invent experiences.
-4. Replace stiff, templated openers ("I am writing to express my strong interest") with direct, human ones ("What drew me to X was…").
-5. Vary sentence length: some short punchy ones, some longer reflective ones.
-6. Add one concrete detail or analogy to make an abstract goal feel real.
-7. Use contractions sparingly where natural (I'm, I've, I'd).
-8. Remove ALL AI buzzwords: passionate, delve, leverage, cutting-edge, robust, seamlessly, pivotal, groundbreaking.
-9. Do NOT add casual phrases like "Look," "Here's the thing," "Honestly" — this is a formal document.
-10. Preserve paragraph structure and logical flow.
-11. Output ONLY the rewritten SOP."""
+ABSOLUTE RULES:
+- Keep every fact: GPA, projects, institutions, career goals, internships. Never fabricate anything.
+- Write in warm, genuine first-person. The voice must feel like a specific human, not a template.
+- Replace "I am writing to express my passion" style openers with direct, specific ones ("What first pulled me toward X was...").
+- Vary sentence length unpredictably. Some sentences: 5 words. Some build slowly across two clauses and land somewhere unexpected.
+- Avoid uniform paragraph sizes — some short (1-2 sentences), some longer.
+- NO buzzwords: passionate, leverage, cutting-edge, robust, seamlessly, paradigm, synergy, pivotal, delve, multifaceted.
+- NO casual phrases: "Look,", "Honestly,", "Here's the thing:" — this is a formal, personal document.
+- One paragraph should open with something concrete and specific rather than a general claim.
+- Output ONLY the rewritten SOP."""
     },
 
-    "📝 College Application Essay": {
+    "📝 Personal Statement": {
         "group": "Academic",
         "pipeline": "formal",
-        "desc": "Personal statements for undergrad admission",
-        "tone_locked": "Authentic & Narrative",
-        "system_prompt": """You are an expert college essay editor helping students sound genuinely themselves.
+        "tone_locked": "Authentic & Reflective",
+        "system": """You are a personal statement editor who specializes in making essays sound like real human beings wrote them.
 
-STRICT RULES:
-1. Keep ALL factual content — events, names, experiences — exactly as written. Never invent or embellish.
-2. Write in a vivid, authentic first-person voice appropriate for a 17-18 year old.
-3. Make the narrative arc feel personal: show, don't tell.
-4. Vary sentence lengths dramatically — mix 3-word punchy sentences with longer flowing ones.
-5. Avoid adult corporate-speak. This should sound like a smart student, not a consultant.
-6. Replace generic reflections ("This experience taught me…") with specific, personal ones when possible.
-7. Contractions are natural and expected here.
-8. Avoid: delve, utilize, leverage, paramount, testament, multifaceted, in conclusion.
-9. Do NOT add experiences or emotions not implied by the original.
-10. Output ONLY the rewritten essay."""
+RULES:
+- Preserve all factual content. Zero fabrication.
+- First-person voice throughout. Warm but not sentimental.
+- Replace abstract motivations with concrete, specific ones grounded in what's already in the text.
+- One moment of genuine vulnerability or honest self-assessment (not dramatic — understated).
+- Vary sentence rhythm: short punchy declarations, then longer more reflective ones.
+- Avoid: "I have always been fascinated by", "This experience taught me that", "I am passionate about."
+- Remove all AI buzzwords.
+- Output ONLY the rewritten statement."""
+    },
+
+    "🎓 College Application Essay (Common App)": {
+        "group": "Academic",
+        "pipeline": "formal",
+        "tone_locked": "Vivid & Authentic",
+        "system": """You are a college essay coach. Rewrite this to sound like a genuine 17-18 year old with a distinct voice.
+
+RULES:
+- Keep all actual events, people, and experiences. Never invent.
+- The voice should feel like a smart, self-aware teenager — not a consultant.
+- Concrete over abstract. Show moments, not summaries.
+- Short punchy sentences mixed with longer flowing ones.
+- One small unexpected detail that makes it feel real and specific.
+- Avoid adult corporate-speak. Avoid: "I am passionate", "deeply impacted", "transformative experience."
+- Output ONLY the rewritten essay."""
     },
 
     "🔬 Research Paper / Academic Essay": {
         "group": "Academic",
         "pipeline": "formal",
-        "desc": "Journal articles, dissertations, academic writing",
         "tone_locked": "Scholarly & Precise",
-        "system_prompt": """You are an academic editor refining this research text to sound naturally human-written while preserving full scholarly integrity.
-
-STRICT RULES:
-1. Preserve ALL citations, data, statistics, methodology, and technical terminology exactly.
-2. Academic transitions (however, therefore, furthermore) are APPROPRIATE here — keep them.
-3. Fix only: overly passive constructions, bloated sentence structures, repetitive phrasing.
-4. Do NOT add contractions, casual language, or personal opinions.
-5. Replace only the most glaring AI phrases: "it is important to note," "delve into," "in the realm of," "as we can see."
-6. Preserve the argument structure, paragraph order, and section flow.
-7. Do NOT add new claims or analysis.
-8. Output ONLY the revised text."""
-    },
-
-    "📚 High School / College Essay": {
-        "group": "Academic",
-        "pipeline": "general",
-        "desc": "Academic essays, argumentative papers",
-        "tone_locked": "Clear & Analytical",
-        "system_prompt": """You are editing an academic essay to sound like a smart student wrote it — not an AI.
+        "system": """You are an academic editor. Refine this text to read as naturally human-written while preserving full scholarly integrity.
 
 RULES:
-1. Maintain academic tone: formal enough for a classroom, but not robotic.
-2. Keep the argument structure and all factual claims intact.
-3. Vary sentence length — mix short direct claims with longer analytical sentences.
-4. Replace formal AI transitions (moreover, furthermore, consequently) with cleaner equivalents (also, this means, as a result, but).
-5. Add one concrete example or analogy to support the argument where it's thin.
-6. Avoid contractions in formal arguments but allow them in topic sentences.
-7. Remove AI buzzwords: delve, pivotal, groundbreaking, multifaceted, testament.
-8. Output ONLY the rewritten essay."""
+- Preserve all citations, data, terminology, and factual claims exactly.
+- Academic transitions (however, therefore, although) are correct here — keep them.
+- Remove only: bloated passive constructions, hollow filler phrases ("it is important to note that," "it goes without saying").
+- Replace "delve into," "in the realm of," "as we can see" with direct scholarly equivalents.
+- Do NOT add casual language, colloquialisms, or personal opinions.
+- Maintain argument structure and paragraph order.
+- Output ONLY the revised text."""
     },
 
-    # ── Professional ──────────────────────────
+    "📚 High School / Undergrad Essay": {
+        "group": "Academic",
+        "pipeline": "formal",
+        "tone_locked": "Clear & Analytical",
+        "system": """You are editing an academic essay to sound like a thoughtful student wrote it — clear, analytical, but not robotic.
+
+RULES:
+- Keep the argument structure and all evidence intact.
+- Mix sentence lengths: some punchy thesis-like sentences, some longer analytical ones.
+- Replace AI transitions (moreover, furthermore, consequently) with cleaner ones (also, this means, and yet, as a result).
+- Remove AI buzzwords: delve, pivotal, groundbreaking, multifaceted, testament, robust.
+- One concrete example or analogy should anchor the argument where it's currently thin.
+- Formal enough for a classroom — no slang, no casual openers.
+- Output ONLY the rewritten essay."""
+    },
+
+    # ══ PROFESSIONAL ══════════════════════════════════════════
     "📧 Professional Email": {
         "group": "Professional",
         "pipeline": "formal",
-        "desc": "Work emails, client communication",
         "tone_locked": "Professional & Direct",
-        "system_prompt": """You are a professional editor lightly editing this email to sound naturally human-written.
+        "system": """You are lightly editing this professional email so it sounds naturally written — not robotic, not over-formatted.
 
 STRICT RULES:
-1. Keep the formal greeting and sign-off exactly (Dear / Best regards / Sincerely). Do NOT change to "Hey".
-2. Keep ALL factual claims, names, dates, and project details exactly as stated. NEVER invent anything.
-3. Make ONLY these changes:
-   - Replace stiff phrases ("I am writing to inform you") with direct equivalents ("I wanted to share")
-   - Add contractions where natural (I am → I'm, I would → I'd, I have → I've)
-   - Break up overly long run-on sentences into two clear ones
-   - Remove throat-clearing filler ("I hope this email finds you well")
-   - Make the ask or closing feel genuine rather than templated
-4. Do NOT add casual phrases, humor, or informality not appropriate for professional email.
-5. Do NOT start sentences with And/But/So.
-6. Preserve bullet point structure if present.
-7. Output ONLY the rewritten email."""
+- Keep the greeting and sign-off exactly (Dear / Best regards / Sincerely / Hi [Name]).
+- Keep ALL facts, names, dates, project details exactly as stated. Never invent.
+- Only change:
+  · Remove filler openers ("I hope this email finds you well," "I am writing to inform you that")
+  · Replace stiff phrases with direct natural ones ("I am pleased to inform you" → "I wanted to share")
+  · Break long run-on sentences into two clear ones
+  · Remove redundant qualifiers ("very important" → "important")
+- Do NOT inject casual phrases, humor, or overly informal language.
+- Do NOT start sentences with And/But/So in a formal email.
+- Keep bullet points intact if they exist.
+- Output ONLY the rewritten email."""
     },
 
     "💼 Cover Letter": {
         "group": "Professional",
         "pipeline": "formal",
-        "desc": "Job applications, internships",
         "tone_locked": "Confident & Genuine",
-        "system_prompt": """You are a professional editor refining this cover letter to sound authentically human.
+        "system": """You are a professional editor refining this cover letter to sound authentic and human.
 
 STRICT RULES:
-1. Keep ALL factual claims: job titles, companies, skills, achievements, years of experience. NEVER fabricate.
-2. Replace the templated opener ("I am writing to express my strong interest") with a direct, confident one ("I'm excited about this role because…").
-3. Make the motivation feel genuine — but only from what's already in the text.
-4. Add contractions where appropriate (I'm, I've, I'd).
-5. Vary sentence length slightly — avoid uniform paragraph sizes.
-6. Replace AI buzzwords: leverage, pivotal, passionate, driven, dynamic, synergy, robust.
-7. Make the closing line feel specific and real, not boilerplate.
-8. Preserve bullet points if present.
-9. Do NOT add new achievements, stories, or qualifications.
-10. Output ONLY the rewritten letter."""
+- Keep ALL factual claims, skills, companies, projects, and years of experience exactly. Never fabricate.
+- Replace the templated opener ("I am writing to express my strong interest") with a direct one ("I'm excited about this role because...").
+- Make the motivation feel grounded — but only in what's already in the text.
+- Vary sentence length slightly — avoid three identical-length sentences in a row.
+- Remove AI buzzwords: leverage, passionate, driven, dynamic, synergy, impactful, results-oriented, hard-working.
+- Keep the closing line specific and real, not boilerplate.
+- Keep bullet points if present — do NOT convert to prose.
+- Do NOT add new achievements or stories.
+- Output ONLY the rewritten letter."""
     },
 
     "🔗 LinkedIn Post / Bio": {
         "group": "Professional",
         "pipeline": "general",
-        "desc": "LinkedIn content, professional bios",
-        "tone_locked": "Authentic & Professional",
-        "system_prompt": """You are a LinkedIn content expert. Rewrite this to sound like a real professional wrote it — not a corporate AI.
+        "tone_locked": "Authentic Professional",
+        "system": """You are a LinkedIn content strategist. Rewrite this to sound like a credible professional, not a corporate AI.
 
 RULES:
-1. Keep all facts, role titles, achievements, and companies exactly as stated.
-2. LinkedIn tone: professional but human. Confident but not boastful.
-3. First-person voice. Natural use of "I".
-4. Short punchy sentences mixed with medium-length ones. No walls of text.
-5. Replace LinkedIn clichés: "passionate," "excited to share," "thrilled to announce," "game-changer," "leverage," "synergy."
-6. Add one specific, concrete detail to make a vague claim feel real.
-7. Remove hashtag overuse. If hashtags exist, keep max 3 and make them relevant.
-8. Output ONLY the rewritten content."""
+- Keep all facts, titles, achievements, and companies exactly.
+- Confident but not boastful. Specific not vague.
+- Short punchy sentences. No walls of text.
+- Replace LinkedIn clichés: "passionate about," "excited to share," "thrilled to announce," "game-changer," "leverage," "synergy."
+- One concrete, specific detail to make a vague claim feel real.
+- Remove hashtag clutter (keep max 3 if they exist and must be relevant).
+- Output ONLY the rewritten content."""
     },
 
     "📊 Business Report / Executive Summary": {
         "group": "Professional",
         "pipeline": "formal",
-        "desc": "Reports, summaries, proposals",
         "tone_locked": "Clear & Executive",
-        "system_prompt": """You are a senior business writer editing this report for clarity and human readability.
+        "system": """You are a senior business writer editing this for clarity and executive readability.
 
-STRICT RULES:
-1. Preserve all data, findings, recommendations, and factual claims exactly.
-2. Replace overly complex passive constructions with clear active voice.
-3. Remove redundant qualifiers ("it is important to note that," "it should be noted").
-4. Replace AI buzzwords: leverage, synergy, paradigm, robust, seamlessly, ecosystem, innovative.
-5. Keep formal structure: headers, bullet points, and numbered lists stay intact.
-6. Do NOT add contractions — this is a formal business document.
-7. Sentences should be clear and direct. Prefer shorter over longer.
-8. Output ONLY the revised text."""
+RULES:
+- Preserve all data, findings, and recommendations exactly.
+- Replace passive constructions with active voice where it improves clarity.
+- Remove redundant qualifiers and throat-clearing ("It should be noted that," "In light of the above").
+- Remove AI buzzwords: leverage, synergy, paradigm, robust, seamlessly, ecosystem, transformative.
+- Keep headers, bullets, and numbered lists intact.
+- Sentences should be direct. Prefer shorter over longer where meaning is equal.
+- Output ONLY the revised text."""
     },
 
-    # ── Creative / Content ─────────────────────
+    "📨 Cold Outreach / Sales Email": {
+        "group": "Professional",
+        "pipeline": "formal",
+        "tone_locked": "Sharp & Personal",
+        "system": """You are a sales copywriter editing this cold outreach email to feel human and compelling.
+
+RULES:
+- Keep the core offer, value prop, and CTA exactly as stated. Never fabricate claims.
+- Open with the prospect's pain or gain, not "I wanted to reach out."
+- Short paragraphs. Short sentences. Each sentence earns its place.
+- Remove: "I hope you're doing well," "I know you're busy," "circle back," "leverage," "synergy."
+- End with a clear, low-friction ask.
+- Output ONLY the rewritten email."""
+    },
+
+    # ══ CREATIVE & CONTENT ════════════════════════════════════
     "✍️ Blog Post / Article": {
         "group": "Creative & Content",
         "pipeline": "general",
-        "desc": "Blogs, articles, opinion pieces",
-        "tone_locked": None,  # Tone selector enabled
-        "system_prompt": None,  # Built dynamically
+        "tone_locked": None,   # Tone selector enabled
+        "system": None,        # Built dynamically
     },
 
-    "📱 Social Media Content": {
+    "🎯 Marketing Copy / Landing Page": {
         "group": "Creative & Content",
         "pipeline": "general",
-        "desc": "Instagram, Twitter/X, Facebook captions",
-        "tone_locked": "Casual & Engaging",
-        "system_prompt": """You are a social media writer. Rewrite this to sound like a real person, not an AI content generator.
-
-RULES:
-1. Keep all factual claims and key messages intact.
-2. Casual, energetic tone. Short sentences. Real human voice.
-3. Remove all corporate-speak and AI buzzwords.
-4. Vary rhythm — some very short sentences, some punchy medium ones.
-5. Contractions everywhere (it's, you're, we're, don't, can't).
-6. One rhetorical question or conversational hook.
-7. If hashtags exist, keep max 3-5 relevant ones.
-8. Output ONLY the rewritten content."""
-    },
-
-    "🎯 Marketing Copy / Ad": {
-        "group": "Creative & Content",
-        "pipeline": "general",
-        "desc": "Product descriptions, ad copy, landing pages",
         "tone_locked": "Persuasive & Human",
-        "system_prompt": """You are a conversion copywriter. Rewrite this marketing copy to sound like it was written by a sharp, human marketer.
+        "system": """You are a conversion copywriter rewriting this to sound like a sharp human marketer wrote it.
 
 RULES:
-1. Keep all product claims, features, and CTAs exactly as stated. Never fabricate benefits.
-2. Lead with the benefit, not the feature.
-3. Short punchy sentences. Power words that feel earned, not hollow.
-4. Remove: cutting-edge, revolutionary, game-changing, innovative, robust, seamlessly, leverage.
-5. Active voice only. Remove all passive constructions.
-6. Add one specific, concrete detail if the copy is vague.
-7. Contractions are natural here (you're, it's, don't, we've).
-8. Output ONLY the rewritten copy."""
+- Keep all product claims, features, and CTAs exactly. Never fabricate benefits.
+- Lead with the benefit, not the feature. Cut every word that doesn't earn its place.
+- Short punchy sentences. Power words that feel earned, not hollow.
+- Remove: cutting-edge, revolutionary, game-changing, innovative, robust, seamlessly, leverage, groundbreaking.
+- Active voice only. Kill passive constructions.
+- One specific, concrete detail to make a vague claim real.
+- Output ONLY the rewritten copy."""
     },
 
-    "📖 Creative / Fictional Writing": {
+    "📱 Social Media Post": {
         "group": "Creative & Content",
         "pipeline": "general",
-        "desc": "Stories, narratives, creative nonfiction",
-        "tone_locked": "Vivid & Narrative",
-        "system_prompt": """You are a literary editor helping this piece of creative writing sound authentically human.
+        "tone_locked": "Casual & Engaging",
+        "system": """You are a social media writer. Rewrite this to sound like a real person posted it.
 
 RULES:
-1. Preserve the story, characters, plot, and all invented details exactly.
-2. Make the prose feel alive: sensory details, rhythm, tension.
-3. Vary sentence length dramatically. Mix fragments with long flowing sentences.
-4. Remove generic descriptors ("beautiful," "amazing," "incredible") and replace with specific, evocative ones.
-5. Remove AI tells: "it is worth noting," "as we can see," "needless to say."
-6. Natural dialogue if present should sound like real people talk — incomplete sentences, interruptions.
-7. Add one small unexpected detail that makes a scene feel real.
-8. Output ONLY the revised text."""
+- Keep all facts and key messages.
+- Casual, energetic tone. Very short sentences. Real human voice.
+- One conversational hook or rhetorical question.
+- Remove all corporate-speak and AI buzzwords.
+- Keep max 3-5 hashtags if they exist.
+- Output ONLY the rewritten post."""
     },
 
-    # ── Personal ──────────────────────────────
-    "💬 Personal Message / Text": {
+    "📖 Creative / Narrative Writing": {
+        "group": "Creative & Content",
+        "pipeline": "general",
+        "tone_locked": "Vivid & Literary",
+        "system": """You are a literary editor. Help this piece of writing sound authentically human and alive.
+
+RULES:
+- Preserve all story elements: characters, plot points, invented details. Never fabricate.
+- Make the prose feel alive: sensory details, rhythm variation, tension.
+- Vary sentence length dramatically. Mix fragments with long flowing sentences.
+- Replace generic descriptors with specific, evocative ones.
+- Remove AI tells: "it is worth noting," "needless to say," "as we can see."
+- If there's dialogue, make it sound like real people — incomplete, alive.
+- Output ONLY the revised text."""
+    },
+
+    "📰 News / Journalism Style": {
+        "group": "Creative & Content",
+        "pipeline": "general",
+        "tone_locked": "Objective & Journalistic",
+        "system": """You are a copy editor. Rewrite this in clean, neutral, AP-style journalistic prose.
+
+RULES:
+- Objective. No opinions. No editorial asides.
+- Active voice. Clear, short sentences.
+- Lead with the most important fact.
+- No jargon. No AI buzzwords.
+- Quotes (if present) must stay verbatim.
+- Output ONLY the rewritten article."""
+    },
+
+    # ══ PERSONAL ══════════════════════════════════════════════
+    "💬 Personal Message / Casual Text": {
         "group": "Personal",
         "pipeline": "general",
-        "desc": "Texts, DMs, personal notes",
-        "tone_locked": "Casual & Personal",
-        "system_prompt": """You are rewriting this to sound like a real person texting or writing a personal note.
+        "tone_locked": "Warm & Casual",
+        "system": """You are rewriting this to sound like a real person wrote a personal message.
 
 RULES:
-1. Keep all factual content and intent intact.
-2. Very casual, warm tone. Like texting a friend.
-3. Contractions everywhere. Short sentences.
-4. One small personal touch or conversational aside.
-5. Remove ALL formal language, corporate phrasing, and AI buzzwords.
-6. It's OK to start sentences with And, But, So.
-7. Output ONLY the rewritten message."""
+- Keep all factual content and intent.
+- Very casual, warm. Like texting a friend or writing a personal note.
+- Short sentences. Natural rhythm.
+- Remove ALL formal language, corporate phrasing, and AI buzzwords.
+- One small personal touch or honest aside.
+- Output ONLY the rewritten message."""
+    },
+
+    "💌 Personal Letter / Thank You Note": {
+        "group": "Personal",
+        "pipeline": "formal",
+        "tone_locked": "Warm & Genuine",
+        "system": """You are editing this personal letter or thank you note to sound heartfelt and genuinely human.
+
+RULES:
+- Keep all specific details about the person or situation exactly.
+- Warm, personal tone. This should feel like it was written with care for a specific person.
+- Remove templated phrases: "I am writing to express my sincere gratitude," "I cannot thank you enough."
+- One specific, concrete memory or detail to make it feel personal.
+- Vary sentence length. Let some sentences breathe.
+- Output ONLY the rewritten letter."""
+    },
+
+    # ══ SPECIALIZED ═══════════════════════════════════════════
+    "⚖️ Legal / Contract Simplification": {
+        "group": "Specialized",
+        "pipeline": "formal",
+        "tone_locked": "Clear & Precise",
+        "system": """You are editing this legal or contract text to be clearer and more readable while preserving all legal meaning.
+
+RULES:
+- Preserve ALL legal terms, obligations, parties, dates, and clauses exactly.
+- Replace unnecessarily complex constructions with direct equivalents that preserve legal meaning.
+- Do NOT remove any substantive legal content or alter the legal effect.
+- Break run-on legal sentences into shorter, clearer ones where safe to do so.
+- Remove hollow legalese fillers: "hereinafter referred to as," "it is hereby agreed that," "in the event that" → "if."
+- Output ONLY the revised text."""
+    },
+
+    "🏥 Medical / Health Communication": {
+        "group": "Specialized",
+        "pipeline": "formal",
+        "tone_locked": "Clear & Compassionate",
+        "system": """You are a medical communications editor. Rewrite this health content to sound clear, human, and compassionate.
+
+RULES:
+- Preserve ALL medical facts, dosages, diagnoses, instructions, and warnings exactly.
+- Replace overly clinical constructions with plain language equivalents where clarity is improved.
+- Warm but factual. Not alarmist. Not dismissive.
+- Remove AI-generic phrases while keeping medical accuracy.
+- If this is patient-facing: use "you" language. If clinical: maintain appropriate register.
+- Output ONLY the revised text."""
+    },
+
+    "🛠️ Technical Documentation": {
+        "group": "Specialized",
+        "pipeline": "formal",
+        "tone_locked": "Clear & Technical",
+        "system": """You are a technical writer editing this documentation to be clear and naturally written.
+
+RULES:
+- Preserve all technical details, commands, parameters, and specifications exactly.
+- Replace passive constructions with active voice where it improves clarity ("It should be noted that X" → "Note: X").
+- Break up overly long sentences into sequential steps where appropriate.
+- Remove filler phrases and AI-generic language.
+- Keep numbered lists and code blocks intact.
+- Output ONLY the revised text."""
     },
 }
 
-# Group them for the UI
 CONTENT_GROUPS = {}
-for key, val in CONTENT_TYPES.items():
-    g = val["group"]
+for k, v in CONTENT_TYPES.items():
+    g = v["group"]
     if g not in CONTENT_GROUPS:
         CONTENT_GROUPS[g] = []
-    CONTENT_GROUPS[g].append(key)
-
-# Tone options (only for Blog Post / Article)
-TONE_OPTIONS = {
-    "Conversational & Raw": "Like texting a smart friend. Casual, direct, uses contractions and short sentences.",
-    "Professional but Natural": "Confident senior voice. Clear, no fluff. Like a sharp colleague explaining something.",
-    "Storyteller": "Narrative flow. Em dashes, vivid details, cause and effect.",
-    "Opinionated Blog": "First-person. Bold opinions. Rhetorical questions. Slightly impatient with fluff.",
-    "Witty & Engaging": "Smart humor, clever observations, light sarcasm where appropriate.",
-    "Neutral & Journalistic": "Objective, factual, AP-style clarity. No opinions.",
-}
-
-TONE_SYSTEM_PROMPTS = {
-    "Conversational & Raw": """You are rewriting this in a genuine, casual human voice — like explaining something to a smart friend.
-RULES: Contractions everywhere. Short mixed with longer sentences. And/But/So sentence starters OK. Simple concrete words. One small parenthetical aside. No jargon. Output ONLY the rewritten text.""",
-
-    "Professional but Natural": """You are a senior editor rewriting this in a confident, direct professional voice — like a sharp colleague, not a consultant.
-RULES: Direct and clear. No fluff. Contractions where natural. Active voice only. Vary sentence length — some punchy short ones, some longer explanatory ones. Output ONLY the rewritten text.""",
-
-    "Storyteller": """You are a narrative writer giving this content story-like flow.
-RULES: Make abstract concepts concrete and visual. Use em dashes — like this — for rhythm. Vary sentence length dramatically. Show cause and effect through narrative progression. One concrete scene-setting detail or analogy. Output ONLY the rewritten text.""",
-
-    "Opinionated Blog": """You are a blogger with a distinct, confident voice.
-RULES: First person. "I" used naturally. Direct and opinionated. Rhetorical questions: "Why does this matter? Because…". Start some sentences with "Look," or "Here's the thing:". Contractions everywhere. Output ONLY the rewritten text.""",
-
-    "Witty & Engaging": """You are a witty writer — sharp, engaging, occasionally irreverent.
-RULES: Clever observations. Light humor where natural. One well-placed subversion of expectation. Contractions and casual phrasing. Never try-hard or cringe. Output ONLY the rewritten text.""",
-
-    "Neutral & Journalistic": """You are a journalist rewriting this in clear, neutral, AP-style prose.
-RULES: Objective. No opinions or editorial asides. Active voice. Short clear sentences. No jargon. No AI buzzwords. No contractions unless in a quote. Output ONLY the rewritten text.""",
-}
-
+    CONTENT_GROUPS[g].append(k)
 
 # ─────────────────────────────────────────────
-#  DETECTOR INSTRUCTIONS
+#  TONE OPTIONS (Blog/Article only)
 # ─────────────────────────────────────────────
 
-def get_detector_instructions(gptzero, originality, turnitin, zerogpt) -> str:
+TONE_PROMPTS = {
+    "Conversational & Raw": """You are rewriting this in a genuine, casual human voice — like a smart person explaining something to a friend.
+WRITING STYLE: Mix very short sentences (3-6 words) with longer, rambling ones that feel natural. Unpredictable vocabulary. Real opinions. Occasionally an aside in parentheses. Avoid uniform paragraph lengths. Do NOT use AI buzzwords or formal transitions.
+Output ONLY the rewritten text. No preamble.""",
+
+    "Professional but Natural": """You are a senior editor rewriting this in a confident, direct professional voice — like a sharp colleague giving a briefing, not a consultant writing a report.
+WRITING STYLE: Direct. No fluff. Active voice. Vary sentence length — some short and punchy, some medium explanatory ones. No jargon. Replace every formal or stiff phrase with a natural professional equivalent.
+Output ONLY the rewritten text. No preamble.""",
+
+    "Storyteller / Narrative": """You are a narrative writer giving this content story-like flow.
+WRITING STYLE: Make abstract concepts concrete and visual. Use em dashes — like this — for rhythm and emphasis. Vary sentence length dramatically. Show cause and effect through narrative. One concrete scene-setting detail or analogy. Unexpected structural choices.
+Output ONLY the rewritten text. No preamble.""",
+
+    "Opinionated / First-Person": """You are a blogger with a distinct, confident voice.
+WRITING STYLE: First person. "I" used naturally. Direct and opinionated. Rhetorical questions: "Why does this matter? Because..." Start some sentences with "Look," or "Here's the thing:" where natural. Vary sentence rhythm wildly. Challenge the obvious.
+Output ONLY the rewritten text. No preamble.""",
+
+    "Witty & Sharp": """You are a witty writer — sharp, clever, occasionally irreverent without trying too hard.
+WRITING STYLE: Smart observations. Light humor where natural. One well-placed subversion of expectation. Unexpected vocabulary choices. Confident, breezy tone. Never forced or cringeworthy.
+Output ONLY the rewritten text. No preamble.""",
+
+    "Neutral & Journalistic": """You are a journalist rewriting this in clean, neutral AP-style prose.
+WRITING STYLE: Objective. No opinions or editorial asides. Active voice. Short clear sentences. No jargon. No AI buzzwords.
+Output ONLY the rewritten text. No preamble.""",
+}
+
+# ─────────────────────────────────────────────
+#  DETECTOR TARGETING INSTRUCTIONS
+# ─────────────────────────────────────────────
+
+def get_detector_instructions(gptzero, originality, turnitin, zerogpt, quillbot) -> str:
+    """
+    Each detector measures different signals. These instructions target those
+    signals at the LLM prompt level — NOT via post-processing.
+    """
     parts = []
     if gptzero:
-        parts.append("""GPTZero Countermeasures (perplexity + burstiness):
-- Mix sentence lengths aggressively. Some: 4 words. Others: longer with embedded clauses.
-- Use one unexpected but correct word choice to raise perplexity.
-- Add one rhetorical question somewhere.""")
+        parts.append("""GPTZERO TARGETING (perplexity + burstiness):
+- Make at least 20% of sentences dramatically shorter than the rest (under 7 words).
+- At least 20% of sentences should run longer than 25 words with embedded clauses.
+- Use at least one word that is correct but slightly unexpected in context.
+- Include one rhetorical question somewhere in the text.
+- Vary the OPENING WORD of each sentence — never start two consecutive sentences with the same word.""")
+
     if originality:
-        parts.append("""Originality.ai Countermeasures (semantic fingerprinting):
-- Restructure the logical ORDER of ideas, not just words.
-- Use idiomatic expressions: "easier said than done," "at the end of the day."
-- Introduce one concrete specific detail (a number, a scenario).
-- Avoid clean topic-sentence → support → conclusion paragraph structure.""")
+        parts.append("""ORIGINALITY.AI TARGETING (semantic fingerprinting + probability chains):
+- Restructure the logical ORDER of ideas across paragraphs — don't just rephrase in the same sequence.
+- Use at least two idiomatic or colloquial expressions that would raise probability scores.
+- Introduce one concrete, specific real-world detail (a number, a named scenario, a comparison).
+- Avoid clean topic-sentence → supporting-detail → conclusion paragraph structure.
+- At least one paragraph should begin mid-thought, as if continuing something from before.""")
+
     if turnitin:
-        parts.append("""Turnitin Countermeasures (structural patterns + personal voice):
-- Break paragraph symmetry. Not all 3–4 sentences. Some: 1. Some: 6.
-- Include one mild opinion or judgment: "which, honestly, is the smarter approach."
-- Avoid perfectly parallel list structures.""")
+        parts.append("""TURNITIN TARGETING (stylometric ML + structural patterns + personal voice):
+- Break paragraph symmetry: not all 3-4 sentences. Include at least one 1-sentence paragraph and one 6+ sentence paragraph.
+- Include at least one subjective observation or mild opinion: "which, in practice, works better than it sounds."
+- Avoid any parallel list structure ("First... Second... Third...").
+- Vary the POSITION of the main claim within paragraphs — sometimes lead, sometimes build to it.""")
+
     if zerogpt:
-        parts.append("""ZeroGPT Countermeasures (formal transitions + uniform clause length):
-- Replace ALL formal transitions (However, Furthermore, Moreover, Additionally) with casual ones: But, Also, So, Plus.
-- Vary clause length inside sentences.
-- Start at least 2 sentences with conjunctions: And, But, So.
-- Use a contraction in every paragraph.""")
-    return "\n\n".join(parts)
+        parts.append("""ZEROGPT TARGETING (formal transitions + uniform clause length):
+- Replace ALL of these transitions: However / Furthermore / Moreover / Additionally / Consequently / Nevertheless / In conclusion.
+- Use instead: But / Also / So / Plus / That said / Even so / And yet / Which means.
+- Vary clause length within sentences — avoid symmetrical paired clauses.
+- At least two sentences should begin with a conjunction (And, But, So).
+- At least one sentence should be deliberately shorter than everything around it.""")
+
+    if quillbot:
+        parts.append("""QUILLBOT TARGETING (paraphrase detection + synonym pattern recognition):
+- Do NOT simply swap synonyms — Quillbot detects synonym-replacement patterns as paraphrasing artifacts.
+- Instead, restructure sentences SYNTACTICALLY: change the grammatical form, not just word choice.
+- Convert some noun phrases to verb phrases and vice versa.
+- Combine two short related sentences into one longer one, or split one long sentence into two short ones.
+- Change the perspective or framing of claims (e.g., "X improves Y" → "Y improves when X is applied").
+- Introduce at least one informal phrase that no paraphraser would generate.""")
+
+    return "\n\n".join(parts) if parts else ""
 
 
 # ─────────────────────────────────────────────
-#  AI CLICHE REMOVAL (SAFE — no regex artifacts)
+#  CLICHE REMOVAL (post-processing — safe only)
 # ─────────────────────────────────────────────
 
-AI_CLICHE_MAP = {
+AI_CLICHES = {
     "delve into": ["dig into", "explore", "look at", "get into"],
-    "delves into": ["digs into", "explores", "gets into"],
-    "delving into": ["digging into", "exploring", "getting into"],
-    "unlock": ["open up", "access", "tap into"],
-    "unleash": ["release", "bring out", "use"],
-    "utilize": ["use", "apply", "work with"],
+    "delves into": ["digs into", "explores"],
+    "delving into": ["digging into", "exploring"],
+    "utilize": ["use", "apply"],
     "utilizes": ["uses", "applies"],
     "leverage": ["use", "tap into", "draw on"],
     "leverages": ["uses", "draws on"],
     "foster": ["build", "grow", "encourage"],
-    "facilitate": ["help", "enable", "support"],
-    "navigate": ["handle", "deal with", "manage"],
-    "ensure": ["make sure", "confirm"],
-    "underscore": ["highlight", "show", "stress"],
-    "showcase": ["show", "highlight", "demonstrate"],
+    "facilitate": ["help", "enable"],
     "harness": ["use", "tap into", "channel"],
     "realm": ["area", "field", "world"],
     "landscape": ["field", "scene", "environment"],
@@ -460,616 +693,503 @@ AI_CLICHE_MAP = {
     "transformative": ["significant", "major", "powerful"],
     "multifaceted": ["complex", "layered", "varied"],
     "seamlessly": ["smoothly", "easily", "naturally"],
-    "notably": ["interestingly", "importantly"],
-    "moreover": ["also", "on top of that", "and"],
-    "furthermore": ["beyond that", "also", "and"],
-    "consequently": ["so", "as a result", "this means"],
-    "nevertheless": ["still", "even so", "but"],
     "in conclusion": ["to wrap up", "so", "bottom line"],
-    "in summary": ["in short", "briefly", "bottom line"],
-    "it is important to note that": ["worth noting,", "keep in mind that", "note that"],
-    "it's important to note that": ["worth noting,", "keep in mind that", "note that"],
-    "it is worth noting that": ["worth mentioning,", "note that"],
-    "it's worth noting that": ["worth mentioning,", "note that"],
+    "in summary": ["in short", "briefly"],
+    "it is important to note that": ["worth noting,", "note that"],
+    "it's important to note that": ["worth noting,", "note that"],
+    "it is worth noting that": ["worth noting,", "note that"],
+    "it's worth noting that": ["worth noting,"],
     "in order to": ["to"],
     "due to the fact that": ["because", "since"],
-    "at this point in time": ["now", "currently"],
-    "game-changer": ["big shift", "major change", "real difference-maker"],
+    "game-changer": ["big shift", "major change"],
     "game changer": ["big shift", "major change"],
-    "one must": ["you need to", "you have to"],
+    "needless to say": ["clearly", "obviously"],
+    "as we can see": ["clearly", "as shown"],
+    "it goes without saying": ["clearly",],
 }
 
-def clean_cliches(text: str) -> str:
-    """Safe cliché replacement using whole-word matching, no regex artifacts."""
-    for phrase, options in sorted(AI_CLICHE_MAP.items(), key=lambda x: -len(x[0])):
+def remove_cliches(text: str) -> str:
+    """Safe word/phrase replacement only. No structural manipulation."""
+    for phrase, options in sorted(AI_CLICHES.items(), key=lambda x: -len(x[0])):
         pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
         if re.search(pattern, text, flags=re.IGNORECASE):
             replacement = random.choice(options)
             text = re.sub(pattern, replacement, text, count=1, flags=re.IGNORECASE)
     return text
 
-
-# ─────────────────────────────────────────────
-#  SAFE POST-PROCESSING (no dot artifacts)
-# ─────────────────────────────────────────────
-
-def safe_split_sentences(text: str):
-    """Split on sentence boundaries without breaking abbreviations."""
-    # Use a simple split that avoids splitting on "Mr. Smith" etc.
-    return re.split(r'(?<=[.!?])(?=\s+[A-Z])', text.strip())
-
-
-def safe_vary_burstiness(text: str) -> str:
-    """
-    Vary sentence length by splitting long sentences at natural conjunction points.
-    Critically: avoids adding extra periods or creating dot artifacts.
-    """
-    sentences = safe_split_sentences(text)
-    result = []
-
-    for sent in sentences:
-        sent = sent.strip()
-        if not sent:
-            continue
-
-        words = sent.split()
-        wc = len(words)
-
-        # Only try to split sentences > 25 words, 60% of the time
-        if wc > 25 and random.random() < 0.6:
-            split_done = False
-            # Look for a natural split point (conjunction) in the middle third
-            search_start = max(8, wc // 3)
-            search_end = min(len(sent) - 8, (len(sent) * 2) // 3)
-
-            for conj in [' and ', ' but ', ' because ', ' while ', ' although ', ' which ', ' so ']:
-                idx = sent.lower().find(conj, search_start)
-                # Make sure we're actually in the middle portion
-                if idx != -1 and idx < search_end:
-                    part1 = sent[:idx].rstrip(' ,').strip()
-                    rest = sent[idx + len(conj):].strip()
-                    if part1 and rest and len(part1.split()) > 4 and len(rest.split()) > 4:
-                        # Ensure part1 ends with exactly one period
-                        if part1[-1] not in '.!?':
-                            part1 = part1 + '.'
-                        # Capitalize start of part2
-                        part2 = rest[0].upper() + rest[1:]
-                        result.append(part1)
-                        result.append(part2)
-                        split_done = True
-                        break
-            if not split_done:
-                result.append(sent)
-        else:
-            result.append(sent)
-
-    return ' '.join(result)
-
-
-def safe_replace_transitions(text: str, aggressive: bool = False) -> str:
-    """Replace formal transitions safely. No regex that introduces artifacts."""
-    replacements = {
-        r'\bHowever,': random.choice(["But", "Still,", "That said,"]),
-        r'\bTherefore,': random.choice(["So,", "That means", "As a result,"]),
-        r'\bFurthermore,': random.choice(["Plus,", "Also,", "And"]),
-        r'\bMoreover,': random.choice(["Plus,", "On top of that,", "Also,"]),
-        r'\bIn addition,': random.choice(["Also,", "Plus,", "And"]),
-        r'\bConsequently,': random.choice(["So,", "Because of that,", "That's why,"]),
-        r'\bNevertheless,': random.choice(["Still,", "Even so,", "But"]),
-        r'\bAdditionally,': random.choice(["Also,", "On top of that,", "Plus,"]),
-    }
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text, count=1)
-    return text
-
-
-def add_human_specificity(text: str) -> str:
-    """Add a human-sounding aside to one sentence (Originality.ai counter)."""
-    asides = [
-        " — and I've seen this firsthand",
-        " — which, in practice, makes a real difference",
-        ", and that's not a small thing",
-        " — something most people overlook",
-        " — simple, but it works",
-        ", which is exactly the point",
-    ]
-    sentences = safe_split_sentences(text)
-    if len(sentences) < 4:
-        return text
-
-    target_idx = random.randint(1, len(sentences) // 2)
-    s = sentences[target_idx].strip()
-
-    # Only add to sentences ending with a period (not already modified)
-    if len(s.split()) > 10 and s.endswith('.'):
-        aside = random.choice(asides)
-        sentences[target_idx] = s[:-1] + aside + '.'
-
-    return ' '.join(sentences)
-
-
-def add_casual_starter(text: str) -> str:
-    """Insert one casual sentence starter (for general/blog content only)."""
-    starters = [
-        "Honestly, ", "Look, ", "Here's the thing: ",
-        "And honestly, ", "To be fair, ", "The thing is, ",
-    ]
-    sentences = safe_split_sentences(text)
-    if len(sentences) < 4:
-        return text
-
-    # Pick a sentence in the middle, not the first or last
-    idx = random.randint(1, len(sentences) - 2)
-    s = sentences[idx].strip()
-
-    # Don't double-apply — skip if sentence already starts with a starter word
-    first_word = s.split()[0].lower() if s.split() else ""
-    if first_word in {"honestly,", "look,", "here's", "and", "but", "so", "to", "the"}:
-        return text
-
-    starter = random.choice(starters)
-    sentences[idx] = starter + s[0].lower() + s[1:]
-    return ' '.join(sentences)
-
-
-def add_contractions(text: str) -> str:
-    """Expand contraction opportunities (safe, no artifacts)."""
-    contractions = [
-        (r'\bit is\b', "it's"),
-        (r'\bthat is\b', "that's"),
-        (r'\bthere is\b', "there's"),
-        (r'\bthey are\b', "they're"),
-        (r'\bwe are\b', "we're"),
-        (r'\byou are\b', "you're"),
-        (r'\bdo not\b', "don't"),
-        (r'\bdoes not\b', "doesn't"),
-        (r'\bis not\b', "isn't"),
-        (r'\bare not\b', "aren't"),
-        (r'\bhave not\b', "haven't"),
-        (r'\bcan not\b', "can't"),
-        (r'\bcannot\b', "can't"),
-        (r'\bwill not\b', "won't"),
-        (r'\bwould not\b', "wouldn't"),
-        (r'\bshould not\b', "shouldn't"),
-        (r'\bcould not\b', "couldn't"),
-        (r'\bdid not\b', "didn't"),
-        (r'\bwas not\b', "wasn't"),
-        (r'\bI am\b', "I'm"),
-        (r'\bI have\b', "I've"),
-        (r'\bI would\b', "I'd"),
-        (r'\bI will\b', "I'll"),
-    ]
-    # Apply each contraction with 70% probability
-    for pattern, replacement in contractions:
-        if random.random() < 0.7:
-            text = re.sub(pattern, replacement, text, count=1, flags=re.IGNORECASE)
-    return text
-
-
-def post_process_general(text: str, gptzero, originality, turnitin, zerogpt) -> str:
-    """Full post-processing pipeline for general/blog content."""
-    text = clean_cliches(text)
-    text = safe_vary_burstiness(text)
-    text = safe_replace_transitions(text, aggressive=True)
-    text = add_contractions(text)
-    if originality:
-        text = add_human_specificity(text)
-    text = add_casual_starter(text)
-    # Clean up any double spaces that might have crept in
-    text = re.sub(r'  +', ' ', text)
-    # Clean up space before punctuation
-    text = re.sub(r' ([,.!?;:])', r'\1', text)
-    return text.strip()
-
-
-def post_process_formal(text: str) -> str:
-    """Minimal post-processing for formal documents."""
-    text = clean_cliches(text)
-    text = add_contractions(text)
-    text = re.sub(r'  +', ' ', text)
-    text = re.sub(r' ([,.!?;:])', r'\1', text)
+def clean_artifacts(text: str) -> str:
+    """Remove common post-LLM artifacts: double spaces, space before punctuation, double periods."""
+    text = re.sub(r'\.{2,}', '.', text)       # Multiple periods → single
+    text = re.sub(r' +\.', '.', text)          # Space before period
+    text = re.sub(r' +,', ',', text)           # Space before comma
+    text = re.sub(r'  +', ' ', text)           # Double spaces
+    text = re.sub(r'\n{3,}', '\n\n', text)     # Triple+ newlines
+    # Remove any preamble that starts with "Here is" or "Here's" 
+    text = re.sub(r'^(Here is|Here\'s|Below is|Below\'s)[^:]*:\s*\n*', '', text, flags=re.IGNORECASE)
     return text.strip()
 
 
 # ─────────────────────────────────────────────
-#  MAIN HUMANIZE FUNCTION
+#  API CLIENTS
 # ─────────────────────────────────────────────
 
-MODEL_OPTIONS = {
-    "Llama 3.3 70B — Best Quality (Recommended)": "llama-3.3-70b-versatile",
-    "Llama 3.1 8B — Fast & Light": "llama-3.1-8b-instant",
-    "Mixtral 8x7B — Alternative": "mixtral-8x7b-32768",
+def get_groq_client(api_key: str):
+    from groq import Groq
+    return Groq(api_key=api_key)
+
+def call_groq(client, model_id: str, system: str, user: str, temperature: float, max_tokens: int) -> str:
+    r = client.chat.completions.create(
+        model=model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=0.95,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+    )
+    return r.choices[0].message.content.strip()
+
+def call_gemini(api_key: str, system: str, user: str, temperature: float, max_tokens: int) -> str:
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        system_instruction=system,
+        generation_config=genai.types.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+    )
+    response = model.generate_content(user)
+    return response.text.strip()
+
+
+# ─────────────────────────────────────────────
+#  HUMANIZE FUNCTION
+# ─────────────────────────────────────────────
+
+GROQ_MODELS = {
+    "Llama 3.3 70B — Best (Recommended)": "llama-3.3-70b-versatile",
+    "Llama 3.1 8B — Faster, Lighter":     "llama-3.1-8b-instant",
+    "Mixtral 8x7B — Alternative":         "mixtral-8x7b-32768",
 }
 
-GENERAL_MODEL = "llama-3.3-70b-versatile"  # Always use best for general pipeline
 
-
-def build_general_system_prompt(tone: str, gptzero, originality, turnitin, zerogpt) -> str:
-    base = TONE_SYSTEM_PROMPTS.get(tone, TONE_SYSTEM_PROMPTS["Conversational & Raw"])
-    targets = get_detector_instructions(gptzero, originality, turnitin, zerogpt)
-    forbidden = "FORBIDDEN WORDS (never use): delve, utilize, leverage, paramount, landscape, realm, testament, moreover, furthermore, in conclusion, cutting-edge, game-changer, groundbreaking, pivotal, robust, seamlessly, foster, comprehensive, transformative, synergy, ecosystem, paradigm, multifaceted, it is important to note, needless to say."
-    combined = base
-    if targets:
-        combined += f"\n\nANTI-DETECTION RULES:\n{targets}"
-    combined += f"\n\n{forbidden}\n\nOutput ONLY the rewritten text. No preamble, no commentary."
-    return combined
+def build_general_system(tone: str, ct_system: str | None, gptzero, originality, turnitin, zerogpt, quillbot) -> str:
+    """Build the full system prompt for general content pipeline."""
+    base = ct_system if ct_system else TONE_PROMPTS.get(tone, TONE_PROMPTS["Conversational & Raw"])
+    detector_rules = get_detector_instructions(gptzero, originality, turnitin, zerogpt, quillbot)
+    forbidden = ("FORBIDDEN — never use these words or phrases: delve, utilize, leverage, paramount, "
+                 "landscape, realm, testament, moreover, furthermore, in conclusion, cutting-edge, "
+                 "game-changer, groundbreaking, pivotal, robust, seamlessly, foster, comprehensive, "
+                 "transformative, synergy, ecosystem, paradigm, multifaceted, it is important to note, "
+                 "needless to say, as we can see, it goes without saying, in order to.")
+    full = base
+    if detector_rules:
+        full += f"\n\n{detector_rules}"
+    full += f"\n\n{forbidden}"
+    full += "\n\nOutput ONLY the rewritten text. Do NOT include any preamble like 'Here is the rewritten version:'"
+    return full
 
 
 def humanize(
     text: str,
     content_type: str,
     tone: str,
-    client,
-    model_id: str,
+    provider: str,
+    groq_api_key: str,
+    groq_model_id: str,
+    gemini_api_key: str,
     stealth: bool,
     gptzero: bool,
     originality: bool,
     turnitin: bool,
     zerogpt: bool,
+    quillbot: bool,
 ) -> str:
+
     ct = CONTENT_TYPES[content_type]
     pipeline = ct["pipeline"]
+    ct_system = ct["system"]
+
+    def call(system: str, user: str, temperature: float, max_tokens: int = 3000) -> str:
+        if provider == "Groq":
+            client = get_groq_client(groq_api_key)
+            return call_groq(client, groq_model_id, system, user, temperature, max_tokens)
+        else:
+            return call_gemini(gemini_api_key, system, user, temperature, max_tokens)
 
     try:
-        # ── FORMAL PIPELINE (single-pass, restrained) ──────────────────
+        # ── FORMAL PIPELINE ───────────────────────────────────────────
         if pipeline == "formal":
-            system_prompt = ct["system_prompt"]
-            r = client.chat.completions.create(
-                model=model_id,
-                temperature=0.6,
-                max_tokens=2800,
-                top_p=0.88,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Please edit this:\n\n{text}"},
-                ]
+            result = call(
+                system=ct_system,
+                user=f"Edit this text:\n\n{text}",
+                temperature=0.65,
+                max_tokens=3000,
             )
-            result = r.choices[0].message.content.strip()
+            result = clean_artifacts(result)
             if stealth:
-                result = post_process_formal(result)
+                result = remove_cliches(result)
             return result
 
-        # ── GENERAL PIPELINE (4-pass, aggressive) ─────────────────────
-        # Use best model for general pipeline always
-        gmodel = GENERAL_MODEL
+        # ── GENERAL PIPELINE (4 passes) ───────────────────────────────
+        system = build_general_system(tone, ct_system, gptzero, originality, turnitin, zerogpt, quillbot)
+        GENERAL_GROQ_MODEL = "llama-3.3-70b-versatile"  # Always best for general
 
-        # Check if this type has a fixed system prompt or dynamic (Blog only)
-        if ct["system_prompt"] is not None:
-            # Content type has its own fixed system prompt
-            pass1_system = ct["system_prompt"]
-            final_system = ct["system_prompt"]
-        else:
-            # Blog/Article — use tone-based prompt
-            pass1_system = TONE_SYSTEM_PROMPTS.get(tone, TONE_SYSTEM_PROMPTS["Conversational & Raw"])
-            final_system = build_general_system_prompt(tone, gptzero, originality, turnitin, zerogpt)
+        def call_general(sys: str, usr: str, temp: float) -> str:
+            if provider == "Groq":
+                client = get_groq_client(groq_api_key)
+                return call_groq(client, GENERAL_GROQ_MODEL, sys, usr, temp, 3500)
+            else:
+                return call_gemini(gemini_api_key, sys, usr, temp, 3500)
 
-        # PASS 1: Expand with creativity (high temp)
-        r1 = client.chat.completions.create(
-            model=gmodel,
-            temperature=1.4,
-            max_tokens=4000,
-            top_p=0.97,
-            messages=[
-                {"role": "system", "content": (
-                    "You are a creative human writer. Expand this text by about 35% — add a personal angle, "
-                    "a concrete example or analogy, and one opinion. Use casual, varied language. "
-                    "Vary sentence lengths dramatically. Do NOT use AI buzzwords. "
-                    "Output ONLY the expanded text. No preamble."
-                )},
-                {"role": "user", "content": text},
-            ]
+        # PASS 1: Structural deconstruction (high temperature)
+        # Goal: break AI's predictable structure before humanizing
+        p1_result = call_general(
+            """You are a structural editor. Your ONLY job: take this text and restructure it so it no longer follows the AI pattern of topic-sentence → support → conclusion in every paragraph.
+
+Rules:
+- Rearrange the ORDER of arguments or ideas (but keep all facts intact).
+- Make paragraph lengths unequal — some very short, some longer.
+- Start at least two paragraphs mid-thought rather than with a clear topic sentence.
+- Do NOT add new information. Do NOT use AI buzzwords.
+- Vary sentence lengths dramatically within each paragraph.
+- Output ONLY the restructured text. No preamble.""",
+            text,
+            1.3,
         )
-        expanded = r1.choices[0].message.content.strip()
 
-        # PASS 2: Humanize with detector-specific rules
-        detector_additions = get_detector_instructions(gptzero, originality, turnitin, zerogpt)
-        pass2_system = pass1_system
-        if detector_additions:
-            pass2_system += f"\n\nANTI-DETECTION RULES:\n{detector_additions}"
-        pass2_system += "\nOutput ONLY the rewritten text. Condense to roughly the original length."
-
-        r2 = client.chat.completions.create(
-            model=gmodel,
-            temperature=1.2,
-            max_tokens=3200,
-            top_p=0.95,
-            messages=[
-                {"role": "system", "content": pass2_system},
-                {"role": "user", "content": f"Rewrite this to sound like a smart human wrote it:\n\n{expanded}"},
-            ]
+        # PASS 2: Voice and tone humanization
+        p2_result = call_general(
+            system,
+            f"Apply your full humanization approach to this text. Make it sound undeniably like a human wrote it:\n\n{p1_result}",
+            1.2,
         )
-        current = r2.choices[0].message.content.strip()
 
-        # PASS 3: Rhythm & structure pass
-        r3 = client.chat.completions.create(
-            model=gmodel,
-            temperature=1.1,
-            max_tokens=3200,
-            top_p=0.93,
-            messages=[
-                {"role": "system", "content": (
-                    "You are a sentence rhythm expert. Make this text sound undeniably human:\n"
-                    "- Ensure NO two consecutive sentences are the same length\n"
-                    "- Replace any formal transitions (However, Furthermore, Moreover, Additionally, Consequently) "
-                    "with casual equivalents (But, Also, So, Plus, That said)\n"
-                    "- Add 1-2 natural casual phrases where appropriate (e.g. 'honestly', 'here's the thing', "
-                    "'to be fair') — but ONLY if it fits the document type and tone\n"
-                    "- Break any overly parallel paragraph structures\n"
-                    "- Do NOT add new facts or fabricate anything\n"
-                    "Output ONLY the result. No preamble."
-                )},
-                {"role": "user", "content": current},
-            ]
+        # PASS 3: Rhythm and flow pass (targets burstiness specifically)
+        p3_result = call_general(
+            """You are a sentence rhythm specialist. Your job: make this text's rhythm feel undeniably human.
+
+Rules:
+- Ensure sentence lengths vary dramatically. After any sentence over 20 words, the next should be under 10.
+- Replace every formal transition word (However, Furthermore, Moreover, Additionally, Consequently, Nevertheless) with a casual equivalent (But, Also, So, Plus, That said, Even so).
+- The first sentence of at least two paragraphs should be unusually short — under 8 words.
+- At least one paragraph should have no clear "topic sentence" at all.
+- If there are three or more consecutive sentences of similar length, break the pattern.
+- Do NOT add new facts. Do NOT use AI buzzwords.
+- Output ONLY the result. No preamble.""",
+            p2_result,
+            1.0,
         )
-        current = r3.choices[0].message.content.strip()
 
-        # PASS 4: Final anti-detection polish
-        r4 = client.chat.completions.create(
-            model=gmodel,
-            temperature=0.9,
-            max_tokens=3200,
-            top_p=0.92,
-            messages=[
-                {"role": "system", "content": (
-                    "Final polish for maximum human authenticity:\n"
-                    "- Remove any remaining AI buzzwords or templated phrases\n"
-                    "- Ensure contractions are used naturally throughout\n"
-                    "- Vary sentence rhythm one last time — no two adjacent sentences should feel the same length\n"
-                    "- If there is a perfectly structured paragraph, slightly break its symmetry\n"
-                    "- Do NOT change factual content\n"
-                    "Output ONLY the final text. No preamble."
-                )},
-                {"role": "user", "content": current},
-            ]
+        # PASS 4: Final coherence and polish
+        p4_result = call_general(
+            """Final quality pass. Your job: make this text flow naturally while maintaining all the human-like qualities it has.
+
+Rules:
+- Fix any awkward phrasing that reads as unnatural (not AI-unnatural — genuinely confusing).
+- Ensure the overall meaning and argument are still clear.
+- If any AI buzzwords slipped in (delve, utilize, leverage, paramount, groundbreaking, pivotal, robust, seamlessly), replace them.
+- Do NOT add new content. Do NOT re-introduce AI sentence patterns.
+- Output ONLY the final text. No preamble.""",
+            p3_result,
+            0.8,
         )
-        current = r4.choices[0].message.content.strip()
 
-        # POST-PROCESSING
+        result = clean_artifacts(p4_result)
         if stealth:
-            current = post_process_general(current, gptzero, originality, turnitin, zerogpt)
-
-        return current
+            result = remove_cliches(result)
+        return result
 
     except Exception as e:
         return f"Error: {str(e)}"
 
 
 # ─────────────────────────────────────────────
-#  CACHE KEY
+#  CACHE
 # ─────────────────────────────────────────────
 
-def make_cache_key(text, content_type, tone, model, stealth, gpt, ori, tur, zer, randomize):
+def make_cache_key(*args, randomize: bool) -> str:
     seed = str(random.random()) if randomize else "static"
-    raw = f"{text}|{content_type}|{tone}|{model}|{stealth}|{gpt}|{ori}|{tur}|{zer}|{seed}"
+    raw = "|".join(str(a) for a in args) + seed
     return hashlib.md5(raw.encode()).hexdigest()
 
 
 # ─────────────────────────────────────────────
-#  UI
+#  SIDEBAR
 # ─────────────────────────────────────────────
 
-# SIDEBAR
 with st.sidebar:
-    st.markdown("### ⚙️ Configuration")
+    st.markdown("<div style='font-family:Syne,sans-serif;font-size:18px;font-weight:800;color:#a855f7;margin-bottom:20px'>✍️ Authentica v5</div>", unsafe_allow_html=True)
 
-    api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...", help="Get yours at console.groq.com")
+    st.markdown("<div class='section-label'>API Provider</div>", unsafe_allow_html=True)
+    provider = st.radio("Provider", ["Groq (Free)", "Google Gemini (Free)"], label_visibility="collapsed")
+    provider_key = "Groq" if "Groq" in provider else "Gemini"
+
+    st.markdown("<div class='section-label'>API Key</div>", unsafe_allow_html=True)
+    if provider_key == "Groq":
+        groq_api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...", help="console.groq.com — Free, no credit card", label_visibility="collapsed")
+        gemini_api_key = ""
+        st.markdown("<div style='font-size:11px;color:#555'>Get free key: console.groq.com</div>", unsafe_allow_html=True)
+    else:
+        gemini_api_key = st.text_input("Gemini API Key", type="password", placeholder="AIza...", help="aistudio.google.com/apikey — Free tier available", label_visibility="collapsed")
+        groq_api_key = ""
+        st.markdown("<div style='font-size:11px;color:#555'>Get free key: aistudio.google.com/apikey</div>", unsafe_allow_html=True)
+
+    if provider_key == "Groq":
+        st.markdown("<div class='section-label'>Model</div>", unsafe_allow_html=True)
+        groq_model_name = st.selectbox("Groq Model", list(GROQ_MODELS.keys()), label_visibility="collapsed")
+        groq_model_id = GROQ_MODELS[groq_model_name]
+    else:
+        groq_model_id = "llama-3.3-70b-versatile"
+
+    st.markdown("<div class='section-label'>Target Detectors</div>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        t_gptzero     = st.checkbox("GPTZero",      value=True)
+        t_turnitin    = st.checkbox("Turnitin",     value=True)
+        t_quillbot    = st.checkbox("Quillbot",     value=True)
+    with c2:
+        t_originality = st.checkbox("Originality", value=True)
+        t_zerogpt     = st.checkbox("ZeroGPT",     value=True)
+
+    st.markdown("<div class='section-label'>Options</div>", unsafe_allow_html=True)
+    stealth    = st.checkbox("Stealth Post-Processing", value=True, help="Applies cliché removal after the LLM pass")
+    randomize  = st.checkbox("Randomize Each Run",      value=True, help="Every run produces a different version")
 
     st.markdown("---")
-    st.markdown("**🎯 Target Detectors**")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        target_gptzero     = st.checkbox("GPTZero",    value=True)
-        target_turnitin    = st.checkbox("Turnitin",   value=True)
-    with col_b:
-        target_originality = st.checkbox("Originality.ai", value=True)
-        target_zerogpt     = st.checkbox("ZeroGPT",   value=True)
+    st.markdown("""<div style='font-size:11px;color:#444;line-height:1.7'>
+<b style='color:#666'>What's new in v5:</b><br>
+✓ Contraction injection removed<br>
+✓ Quillbot detector targeting added<br>
+✓ Copy button on output<br>
+✓ 20 content types across 5 groups<br>
+✓ Structural-level rewriting (4 passes)<br>
+✓ Gemini 2.0 Flash support (free)<br>
+✓ Dot artifacts fixed<br>
+✓ Preamble stripping
+</div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("**🤖 Model**")
-    selected_model_name = st.selectbox("", list(MODEL_OPTIONS.keys()), label_visibility="collapsed")
-    selected_model_id = MODEL_OPTIONS[selected_model_name]
 
-    st.markdown("---")
-    st.markdown("**⚙️ Options**")
-    stealth   = st.checkbox("Stealth Post-Processing", value=True,
-                            help="Applies a secondary layer of cliché removal, rhythm variation, and human-sounding touches after the LLM pass.")
-    randomize = st.checkbox("Randomize Each Run", value=True,
-                            help="Disables result caching so every run generates a fresh version.")
+# ─────────────────────────────────────────────
+#  MAIN UI
+# ─────────────────────────────────────────────
 
-    st.markdown("---")
-    st.markdown("""
-<div style="font-size:12px;color:#888;line-height:1.6">
-<b>Tips for best results:</b><br>
-• Use all 4 detectors for maximum stealth<br>
-• General content uses a 4-pass pipeline<br>
-• Formal docs use a 1-pass restrained pipeline<br>
-• Always verify output before submitting
+# Header
+st.markdown("""
+<div class="main-header">
+  <p class="brand-title">✍️ Authentica <span class="brand-accent">v5</span></p>
+  <p class="brand-sub">STRUCTURAL AI HUMANIZER · MULTI-DETECTOR ENGINE · 20 CONTENT TYPES</p>
 </div>
 """, unsafe_allow_html=True)
 
+# Detector badges
+detector_html = ""
+for label, active in [("GPTZero", t_gptzero), ("Originality.ai", t_originality),
+                       ("Turnitin", t_turnitin), ("ZeroGPT", t_zerogpt), ("Quillbot", t_quillbot)]:
+    cls = "badge-on" if active else "badge-off"
+    detector_html += f'<span class="badge {cls}">{label}</span>'
+st.markdown(f"<div style='margin-bottom:20px'>{detector_html}</div>", unsafe_allow_html=True)
 
-# MAIN CONTENT
-st.markdown("## 🖊️ Authentica v4")
-st.markdown("AI content humanizer with **document-aware pipelines** and **multi-detector targeting**.")
+# Content type selection
+st.markdown("<div class='section-label'>Content Type</div>", unsafe_allow_html=True)
+group_col, type_col = st.columns([1, 3])
 
-# Active detector badges
-badges_html = ""
-for label, active in [
-    ("GPTZero", target_gptzero),
-    ("Originality.ai", target_originality),
-    ("Turnitin", target_turnitin),
-    ("ZeroGPT", target_zerogpt),
-]:
-    cls = "badge-active" if active else "badge-inactive"
-    badges_html += f'<span class="badge {cls}">{label}</span> '
+with group_col:
+    selected_group = st.radio("Group", list(CONTENT_GROUPS.keys()), label_visibility="collapsed")
 
-st.markdown(f"**Targeting:** {badges_html}", unsafe_allow_html=True)
-st.markdown("---")
-
-# CONTENT TYPE SELECTOR — grouped
-st.markdown("#### 📂 Select Content Type")
-group_labels = list(CONTENT_GROUPS.keys())
-selected_group = st.radio("Category", group_labels, horizontal=True, label_visibility="collapsed")
-content_type_options = CONTENT_GROUPS[selected_group]
-
-col_ct1, col_ct2 = st.columns([3, 2])
-with col_ct1:
-    content_type = st.selectbox(
-        f"{selected_group} types:",
-        content_type_options,
-        label_visibility="visible",
-    )
+with type_col:
+    ct_options = CONTENT_GROUPS[selected_group]
+    content_type = st.selectbox("Content Type", ct_options, label_visibility="collapsed")
 
 ct_info = CONTENT_TYPES[content_type]
-with col_ct2:
-    pipeline_label = "🚀 4-Pass Aggressive" if ct_info["pipeline"] == "general" else "🎯 1-Pass Restrained"
-    tone_label = ct_info.get("tone_locked") or "User-selected"
-    st.markdown(f"""
-<div class="pipeline-card">
-<div class="pipeline-title">{pipeline_label}</div>
-<div class="pipeline-desc">{ct_info['desc']}</div>
-<div class="pipeline-desc" style="margin-top:6px">Tone: <b>{tone_label}</b></div>
-</div>
-""", unsafe_allow_html=True)
+pipeline_label = "🚀 4-Pass General" if ct_info["pipeline"] == "general" else "🎯 1-Pass Formal"
+tone_label = ct_info.get("tone_locked") or "User-Selected"
 
-# TONE SELECTOR — only for Blog Post / Article
-tone = "Conversational & Raw"  # default
-if ct_info.get("tone_locked") is None:  # Blog/Article only
-    st.markdown("#### 🎨 Tone")
-    tone_cols = st.columns(len(TONE_OPTIONS))
-    selected_tone = None
-    for i, (t_name, t_desc) in enumerate(TONE_OPTIONS.items()):
-        with tone_cols[i]:
-            if st.button(t_name.split(" & ")[0], key=f"tone_{i}", use_container_width=True):
+col_info_a, col_info_b, col_info_c = st.columns(3)
+col_info_a.markdown(f"<div class='info-chip'>Pipeline: <span class='info-chip-val'>{pipeline_label}</span></div>", unsafe_allow_html=True)
+col_info_b.markdown(f"<div class='info-chip'>Tone: <span class='info-chip-val'>{tone_label}</span></div>", unsafe_allow_html=True)
+col_info_c.markdown(f"<div class='info-chip'>Provider: <span class='info-chip-val'>{provider_key}</span></div>", unsafe_allow_html=True)
+
+# Tone selector (Blog/Article only)
+tone = "Conversational & Raw"
+if ct_info.get("tone_locked") is None:
+    st.markdown("<div class='section-label' style='margin-top:16px'>Tone</div>", unsafe_allow_html=True)
+    tone_names = list(TONE_PROMPTS.keys())
+    tcols = st.columns(len(tone_names))
+    for i, t_name in enumerate(tone_names):
+        with tcols[i]:
+            short = t_name.split(" ")[0]
+            if st.button(short, key=f"tone_btn_{i}", use_container_width=True):
                 st.session_state["selected_tone"] = t_name
     tone = st.session_state.get("selected_tone", "Conversational & Raw")
-
-    # Show active tone description
-    st.markdown(f"""
-<div class="tip-card">
-<b>{tone}</b> — {TONE_OPTIONS[tone]}
-</div>
-""", unsafe_allow_html=True)
+    st.markdown(f"<div class='tip-row'><b>{tone}</b> — {TONE_PROMPTS[tone][:80]}...</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# INPUT / OUTPUT
+# Main columns
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("#### 📥 Input")
+    st.markdown("<div class='section-label'>Input Text</div>", unsafe_allow_html=True)
     input_text = st.text_area(
-        "Paste your text here",
-        height=400,
-        placeholder="Paste your AI-generated text here...\n\nSupports any length — essays, emails, SOPs, blog posts, cover letters, and more.",
+        "Input",
+        height=420,
+        placeholder="Paste your AI-generated text here...\n\nWorks with any length — essays, emails, SOPs, blog posts, cover letters, creative writing, and more.",
         label_visibility="collapsed",
     )
     wc_in = len(input_text.split()) if input_text.strip() else 0
-    st.caption(f"Word count: **{wc_in}**")
+    st.markdown(f"<div class='wc-display'>{wc_in} words</div>", unsafe_allow_html=True)
+
+    run = st.button("✦ Humanize Now", type="primary", use_container_width=True)
 
 with col2:
-    st.markdown("#### 📤 Output")
-    output_placeholder = st.empty()
-    status_placeholder = st.empty()
+    st.markdown("<div class='section-label'>Output</div>", unsafe_allow_html=True)
+    output_slot = st.empty()
+    status_slot = st.empty()
+    copy_slot   = st.empty()
+    stats_slot  = st.empty()
 
-    run_btn = st.button("🚀 Humanize Now", type="primary", use_container_width=True)
-
-    if run_btn:
-        if not api_key:
-            st.error("⚠️ Please add your Groq API key in the sidebar.")
+    if run:
+        # Validation
+        api_key_present = (provider_key == "Groq" and groq_api_key) or (provider_key == "Gemini" and gemini_api_key)
+        if not api_key_present:
+            status_slot.error(f"⚠️ Please enter your {provider_key} API key in the sidebar.")
         elif not input_text.strip():
-            st.warning("Please paste some text to humanize.")
-        elif wc_in < 20:
-            st.warning("Text is too short. Please provide at least 20 words for best results.")
-        elif not any([target_gptzero, target_originality, target_turnitin, target_zerogpt]):
-            st.warning("Select at least one target detector in the sidebar.")
+            status_slot.warning("Please paste some text to humanize.")
+        elif wc_in < 15:
+            status_slot.warning("Text is too short. Please provide at least 15 words for best results.")
+        elif not any([t_gptzero, t_originality, t_turnitin, t_zerogpt, t_quillbot]):
+            status_slot.warning("Select at least one target detector in the sidebar.")
         else:
-            client = Groq(api_key=api_key)
-            pipeline_name = "4-pass aggressive" if ct_info["pipeline"] == "general" else "1-pass restrained"
-
             if "cache" not in st.session_state:
                 st.session_state.cache = {}
 
             ck = make_cache_key(
-                input_text, content_type, tone, selected_model_id,
-                stealth, target_gptzero, target_originality, target_turnitin, target_zerogpt,
-                randomize
+                input_text, content_type, tone, provider_key, groq_model_id,
+                stealth, t_gptzero, t_originality, t_turnitin, t_zerogpt, t_quillbot,
+                randomize=randomize,
             )
 
-            with st.spinner(f"Running {pipeline_name} pipeline for **{content_type}**..."):
+            p_label = "4-pass general" if ct_info["pipeline"] == "general" else "1-pass formal"
+            with st.spinner(f"Running {p_label} pipeline…"):
                 if ck in st.session_state.cache and not randomize:
                     result = st.session_state.cache[ck]
                 else:
                     result = humanize(
-                        input_text,
-                        content_type,
-                        tone,
-                        client,
-                        selected_model_id,
-                        stealth,
-                        target_gptzero,
-                        target_originality,
-                        target_turnitin,
-                        target_zerogpt,
+                        text=input_text,
+                        content_type=content_type,
+                        tone=tone,
+                        provider=provider_key,
+                        groq_api_key=groq_api_key,
+                        groq_model_id=groq_model_id,
+                        gemini_api_key=gemini_api_key,
+                        stealth=stealth,
+                        gptzero=t_gptzero,
+                        originality=t_originality,
+                        turnitin=t_turnitin,
+                        zerogpt=t_zerogpt,
+                        quillbot=t_quillbot,
                     )
                     if not result.startswith("Error:"):
                         st.session_state.cache[ck] = result
 
             if result.startswith("Error:"):
-                st.error(result)
+                status_slot.error(result)
             else:
-                output_placeholder.text_area(
-                    "Humanized output",
+                # Output text area
+                output_slot.text_area(
+                    "Output",
                     value=result,
-                    height=400,
+                    height=420,
                     label_visibility="collapsed",
+                    key="output_area"
                 )
+
                 wc_out = len(result.split())
-                st.caption(f"Word count: **{wc_out}**")
-                st.success(f"✅ Done! {pipeline_name.capitalize()} pipeline complete.")
+                st.markdown(f"<div class='wc-display'>{wc_out} words</div>", unsafe_allow_html=True)
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pipeline", "Aggressive" if ct_info["pipeline"] == "general" else "Restrained")
-                m2.metric("Passes", 4 if ct_info["pipeline"] == "general" else 1)
-                m3.metric("Detectors", sum([target_gptzero, target_originality, target_turnitin, target_zerogpt]))
-                m4.metric("Post-Proc", "On" if stealth else "Off")
+                # Copy button using st.code for easy copying
+                with copy_slot.expander("📋 Click to copy output"):
+                    st.code(result, language=None)
 
-# EXPLAINER
+                status_slot.markdown("<div class='success-bar'>✓ Humanization complete</div>", unsafe_allow_html=True)
+
+                # Stats
+                stats_slot.markdown(f"""
+<div class="stat-grid">
+  <div class="stat-card"><div class="stat-val">{"4" if ct_info["pipeline"] == "general" else "1"}</div><div class="stat-lbl">Passes</div></div>
+  <div class="stat-card"><div class="stat-val">{sum([t_gptzero, t_originality, t_turnitin, t_zerogpt, t_quillbot])}</div><div class="stat-lbl">Detectors</div></div>
+  <div class="stat-card"><div class="stat-val">{wc_out}</div><div class="stat-lbl">Words</div></div>
+  <div class="stat-card"><div class="stat-val">{"ON" if stealth else "OFF"}</div><div class="stat-lbl">Stealth</div></div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  TIPS & EXPLAINER
+# ─────────────────────────────────────────────
+
 st.markdown("---")
-with st.expander("📖 How Authentica v4 works"):
+col_t1, col_t2 = st.columns(2)
+
+with col_t1:
+    st.markdown("<div class='section-label'>Manual refinement tips</div>", unsafe_allow_html=True)
     st.markdown("""
-    ### Two pipelines, zero tone pollution
+<div class="tip-row">1. Add one real specific detail — a year, a number, a named example</div>
+<div class="tip-row">2. Turn one statement into a question: "Why does this matter? Because..."</div>
+<div class="tip-row">3. Break one long paragraph in half, or merge two short ones</div>
+<div class="tip-row">4. Add one self-correction or parenthetical aside (like this one)</div>
+<div class="tip-row">5. Read it aloud — anything that sounds robotic is a detector signal</div>
+""", unsafe_allow_html=True)
 
-    | Content Type | Pipeline | Passes | Temperature | Post-Processing |
-    |---|---|---|---|---|
-    | Blog / Article | General | 4 | 0.9 – 1.4 | Full: burstiness, transitions, specificity |
-    | SOP / Personal Statement | Formal | 1 | 0.6 | Minimal: clichés + contractions only |
-    | Cover Letter | Formal | 1 | 0.6 | Minimal |
-    | Professional Email | Formal | 1 | 0.6 | Minimal |
-    | Academic / Research | Formal | 1 | 0.6 | Minimal |
-    | College App Essay | Formal | 1 | 0.6 | Minimal |
-    | LinkedIn / Social | General | 4 | 0.9 – 1.4 | Full |
-    | Marketing Copy | General | 4 | 0.9 – 1.4 | Full |
+with col_t2:
+    st.markdown("<div class='section-label'>Why v5 works better</div>", unsafe_allow_html=True)
+    st.markdown("""
+<div class="tip-row"><b>No contraction injection</b> — detectors now flag "I'm, I'd, I've" chains as a humanizer artifact</div>
+<div class="tip-row"><b>Structural rewriting</b> — Pass 1 breaks AI's predictable paragraph structure before humanizing</div>
+<div class="tip-row"><b>No synonym swapping</b> — Quillbot-style synonym replacement is itself detectable; we restructure syntax instead</div>
+<div class="tip-row"><b>Rhythm-specific pass</b> — Pass 3 targets burstiness (sentence length variation) explicitly</div>
+""", unsafe_allow_html=True)
 
-    ### Detector-specific targeting
+with st.expander("📖 Full pipeline & detector reference"):
+    st.markdown("""
+### Pipeline summary
 
-    | Detector | Primary Signal | Fix Applied |
-    |---|---|---|
-    | **GPTZero** | Low perplexity + low burstiness | High temp, mixed sentence lengths, unexpected word choices |
-    | **Originality.ai** | Semantic fingerprinting | Idea reordering, concrete specifics injected, idioms |
-    | **Turnitin** | Structural patterns + absent personal voice | Paragraph asymmetry, opinion statements |
-    | **ZeroGPT** | Formal transitions + uniform clauses | All formal transitions replaced, contractions everywhere |
+| Content Type | Pipeline | Passes | Temperature | Post-Proc |
+|---|---|---|---|---|
+| Blog / Article | General | 4 | 0.8 – 1.3 | Clichés only |
+| SOP / Personal Statement | Formal | 1 | 0.65 | Clichés only |
+| Cover Letter | Formal | 1 | 0.65 | Clichés only |
+| Professional Email | Formal | 1 | 0.65 | Clichés only |
+| Academic / Research | Formal | 1 | 0.65 | Clichés only |
+| LinkedIn / Social | General | 4 | 0.8 – 1.3 | Clichés only |
+| Marketing Copy | General | 4 | 0.8 – 1.3 | Clichés only |
+| Creative Writing | General | 4 | 0.8 – 1.3 | Clichés only |
 
-    ### What was fixed in v4
-    - ✅ Rogue dot artifacts eliminated — sentence splitting now validates both parts before creating new sentences
-    - ✅ 12 content types with document-specific system prompts
-    - ✅ Tone selector only appears for Blog/Article (not SOPs or emails where it causes problems)
-    - ✅ Formal docs never receive casual injections ("Look,", "Honestly,") that sound wrong in professional context
-    - ✅ Post-processing cleans double spaces and space-before-punctuation artifacts
-    - ✅ Cache key logic fixed so randomization actually works correctly
-    - ✅ Fragment injection removed (was creating single-word sentences mid-paragraph)
-    - ✅ Comma splice injection removed (was creating unnatural grammar errors)
-    """)
+### What each detector actually measures
 
-st.markdown("---")
-st.markdown("<div style='text-align:center;color:#bbb;font-size:12px'>Authentica v4 · Powered by Groq Cloud · For legitimate content work only</div>", unsafe_allow_html=True)
+| Detector | Primary Signal | v5 Counter-Strategy |
+|---|---|---|
+| **GPTZero** | Perplexity (token predictability) + Burstiness (sentence length variation) | Pass 1 restructures paragraph order; Pass 3 forces dramatic sentence length variation |
+| **Originality.ai** | Semantic fingerprinting — compares probability chains to known LLM outputs | Reorders idea sequence, injects idioms, adds concrete specifics |
+| **Turnitin** | Stylometric ML trained on millions of papers — detects structural patterns, not just words | Breaks paragraph symmetry, adds subjective observations, eliminates parallel list structures |
+| **ZeroGPT** | Heavy reliance on formal transition detection + uniform clause lengths | All formal transitions replaced; clause lengths varied explicitly in Pass 3 |
+| **Quillbot** | Detects synonym-replacement paraphrasing patterns as a distinct signature | We restructure syntax (sentence form, perspective, order) rather than swapping synonyms |
+
+### Why contractions were removed
+Older humanizers injected `I'm, I'd, I've, can't` etc. everywhere.
+Modern detectors (GPTZero 3.15b, Originality.ai) now recognize this chain of contractions as a **humanizer artifact** — it actually raises the AI probability score.
+v5 lets the LLM decide naturally when contractions appear, rather than forcing them.
+
+### Free API providers
+- **Groq**: 14,400 requests/day free. Llama 3.3 70B at 300+ tokens/sec. Get key: console.groq.com
+- **Google Gemini 2.0 Flash**: 1,000 requests/day free. Get key: aistudio.google.com/apikey
+""")
+
+st.markdown("""
+<div style='text-align:center;color:#333;font-size:11px;margin-top:30px;padding:20px'>
+Authentica v5 · Structural Humanizer · Powered by Groq + Gemini · For legitimate content work only
+</div>
+""", unsafe_allow_html=True)
